@@ -3,9 +3,9 @@ use std::fmt::{Display, Formatter};
 use std::fmt;
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::{SystemTime, Duration};
+use std::time::{Duration, SystemTime};
 
-use crate::common::{CommonError, required};
+use crate::common::{CommonError, Domain, required};
 use crate::foundation::executor;
 
 /// Unit represents the type of a value in [measurements](Measurement)
@@ -173,7 +173,9 @@ impl PartialEq for Tags {
 }
 
 impl Clone for Tags {
-    fn clone(&self) -> Self {
+    fn clone(
+        &self
+    ) -> Self {
         Tags {
             entries: self.entries.clone()
         }
@@ -467,12 +469,408 @@ impl Distribution {
     }
 }
 
+impl Domain for &Distribution {
+    fn check_domain(
+        &self,
+        name: &'static str
+    ) -> Result<(), CommonError> {
+        required(&self.values, name)
+    }
+}
+
 #[derive(Debug)]
-pub struct Metric {}
+pub struct Metric {
+    label: &'static str,
+    tags: BTreeMap<String, String>,
+    unit: &'static str,
+    count: u128,
+    sum: i128,
+    max: i128,
+    min: i128,
+    mode: Option<i128>,
+    mean: i128,
+    median: i128,
+    distribution: BTreeMap<i128, u128>,
+    duration: u128,
+    at: SystemTime,
+    percentiles: Vec<i128>,
+}
 
 impl Metric {
-    fn new(distribution: &Distribution) -> Self {
-        Metric {}
+    fn new(distribution: &Distribution) -> Result<Self, CommonError> {
+        required(distribution, "distribution")?;
+
+        let tags = Metric::tags_from(&distribution.tags);
+        let frequency_distribution = Metric::distribution_from(distribution);
+        let count = Metric::count_from(&frequency_distribution)?;
+        let duration = Metric::duration_from(distribution)?;
+        let sum = Metric::sum_from(&frequency_distribution)?;
+        let max = Metric::max_from(&frequency_distribution);
+        let min = Metric::min_from(&frequency_distribution);
+        let mode = Metric::mode_from(&frequency_distribution);
+        let mean = Metric::mean_from(count, sum);
+        let median = Metric::median_from(count, &frequency_distribution)?;
+        let percentiles = Metric::percentiles_from(
+            count, &frequency_distribution, vec![
+                5.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0, 99.9, 99.99, 99.999, 99.9999, 99.99999
+            ])?;
+
+        Ok(Metric {
+            label: distribution.label,
+            tags,
+            unit: distribution.unit,
+            count,
+            sum,
+            max,
+            min,
+            mode,
+            mean,
+            median,
+            distribution: frequency_distribution,
+            duration,
+            at: distribution.last,
+            percentiles
+        })
+    }
+
+    pub fn label(
+        &self
+    ) -> &'static str {
+        self.label
+    }
+
+    pub fn tags(
+        &self
+    ) -> &BTreeMap<String, String> {
+        &self.tags
+    }
+
+    pub fn unit(
+        &self
+    ) -> &'static str {
+        self.unit
+    }
+
+    pub fn count(
+        &self
+    ) -> u128 {
+        self.count
+    }
+
+    pub fn sum(
+        &self
+    ) -> i128 {
+        self.sum
+    }
+
+    pub fn max(
+        &self
+    ) -> i128 {
+        self.max
+    }
+
+    pub fn min(
+        &self
+    ) -> i128 {
+        self.min
+    }
+
+    pub fn mode(
+        &self
+    ) -> &Option<i128> {
+        &self.mode
+    }
+
+    pub fn mean(
+        &self
+    ) -> i128 {
+        self.mean
+    }
+
+    pub fn median(
+        &self
+    ) -> i128 {
+        self.median
+    }
+
+    pub fn distribution(
+        &self
+    ) -> &BTreeMap<i128, u128> {
+        &self.distribution
+    }
+
+    pub fn duration(
+        &self
+    ) -> u128 {
+        self.duration
+    }
+
+    pub fn at(
+        &self
+    ) -> &SystemTime {
+        &self.at
+    }
+
+    pub fn p05(
+        &self
+    ) -> i128 {
+        self.percentiles[0]
+    }
+
+    pub fn p25(
+        &self
+    ) -> i128 {
+        self.percentiles[1]
+    }
+
+    pub fn p50(
+        &self
+    ) -> i128 {
+        self.percentiles[2]
+    }
+
+    pub fn p75(
+        &self
+    ) -> i128 {
+        self.percentiles[3]
+    }
+
+    pub fn p90(
+        &self
+    ) -> i128 {
+        self.percentiles[4]
+    }
+
+    pub fn p95(
+        &self
+    ) -> i128 {
+        self.percentiles[5]
+    }
+
+    pub fn p99(
+        &self
+    ) -> i128 {
+        self.percentiles[6]
+    }
+
+    pub fn p99_9(
+        &self
+    ) -> i128 {
+        self.percentiles[7]
+    }
+
+    pub fn p99_99(
+        &self
+    ) -> i128 {
+        self.percentiles[8]
+    }
+
+    pub fn p99_999(
+        &self
+    ) -> i128 {
+        self.percentiles[9]
+    }
+
+    pub fn p99_9999(
+        &self
+    ) -> i128 {
+        self.percentiles[10]
+    }
+
+    pub fn p99_99999(
+        &self
+    ) -> i128 {
+        self.percentiles[11]
+    }
+
+    fn tags_from(
+        tags: &Tags
+    ) -> BTreeMap<String, String> {
+        tags.entries.clone()
+    }
+
+    fn distribution_from(
+        distribution: &Distribution
+    ) -> BTreeMap<i128, u128> {
+        let mut map = BTreeMap::new();
+        for (key, value) in distribution.values.clone() {
+            map.insert(key, value);
+        }
+        map
+    }
+
+    fn count_from(
+        distribution: &BTreeMap<i128, u128>
+    ) -> Result<u128, CommonError> {
+        let mut count: u128 = 0;
+        for (_, value) in distribution {
+            match count.checked_add(*value) {
+                None => {
+                    return Err(CommonError::IsInvalid(
+                        format!("An overflow occurred while determining count")));
+                },
+                Some(r) => {
+                    count = r;
+                }
+            }
+        }
+        Ok(count)
+    }
+
+    fn sum_from(
+        distribution: &BTreeMap<i128, u128>
+    ) -> Result<i128, CommonError> {
+        let mut sum: i128 = 0;
+        for (key, value) in distribution {
+            let x = match key.checked_mul(*value as i128) {
+                None => {
+                    return Err(CommonError::IsInvalid(
+                        format!("An overflow occurred while determining sum")));
+                }
+                Some(r) => r
+            };
+            match sum.checked_add(x) {
+                None => {}
+                Some(r) => {
+                    sum = r;
+                }
+            }
+        }
+        Ok(sum)
+    }
+
+    fn max_from(
+        distribution: &BTreeMap<i128, u128>
+    ) -> i128 {
+        return *distribution.keys().next_back().unwrap();
+    }
+
+    fn min_from(
+        distribution: &BTreeMap<i128, u128>
+    ) -> i128 {
+        return *distribution.keys().next().unwrap();
+    }
+
+    fn mode_from(
+        distribution: &BTreeMap<i128, u128>
+    ) -> Option<i128> {
+        let mut map = BTreeMap::new();
+        for (key, value) in distribution {
+            let vec = match map.get_mut(value) {
+                Some(v) => v,
+                None => {
+                    map.insert(value, Vec::new());
+                    map.get_mut(value).unwrap()
+                }
+            };
+            vec.push(key);
+        }
+        if !map.is_empty() {
+            let vec = map.values().next_back().unwrap();
+            if vec.len() == 1 {
+                return Some(**vec.first().unwrap());
+            }
+        }
+        None
+    }
+
+    fn mean_from(
+        count: u128,
+        sum: i128,
+    ) -> i128 {
+        sum / count as i128
+    }
+
+    fn median_from(
+        count: u128,
+        distribution: &BTreeMap<i128, u128>,
+    ) -> Result<i128, CommonError> {
+        let mut sum = 0;
+        let position = count / 2;
+        let limit = 1 + count % 2;
+        for i in 0..limit {
+            let x = match Metric::value_at(i + position, distribution) {
+                None => {
+                    return Err(CommonError::IsInvalid(format!("Failed to determine median")));
+                },
+                Some(r) => r
+            };
+            sum = match x.checked_add(sum) {
+                None => {
+                    return Err(CommonError::IsInvalid(
+                        format!("Overflow occurred while determining median")));
+                },
+                Some(r) => r
+            };
+        }
+        Ok(sum / limit as i128)
+    }
+
+    fn duration_from(
+        distribution: &Distribution
+    ) -> Result<u128, CommonError> {
+        match distribution.last.duration_since(distribution.first) {
+            Ok(d) => Ok(d.as_nanos()),
+            Err(_) => {
+                Err(CommonError::IsInvalid(
+                    format!("Negative duration is not allowed")))
+            }
+        }
+    }
+
+    fn value_at(
+        position: u128,
+        distribution: &BTreeMap<i128, u128>,
+    ) -> Option<i128> {
+        let mut lower = 0;
+        for (key, value) in distribution {
+            let upper = match value.checked_add(lower) {
+                None => return None,
+                Some(r) => r
+            };
+            if position < upper && position >= lower {
+                return Some(*key);
+            }
+            lower = upper;
+        }
+        None
+    }
+
+    // https://en.wikipedia.org/wiki/Percentile#The_nearest-rank_method
+    fn percentiles_from(
+        count: u128,
+        distribution: &BTreeMap<i128, u128>,
+        percentiles: Vec<f64>
+    ) -> Result<Vec<i128>, CommonError> {
+        if percentiles.is_empty()
+            || percentiles.iter().next().unwrap() <= &0.0
+            || percentiles.iter().next_back().unwrap() > &100.0 {
+            return Err(CommonError::IsInvalid(
+                format!("Failed to determine percentiles")));
+        }
+        let mut it = distribution.iter();
+        let mut vec = Vec::new();
+        let mut lower = 0;
+        for percentile in percentiles {
+            let position = percentile / 100.0 * count as f64;
+            let position = position.round() as u128;
+            while let Some((key, value)) = it.next() {
+                let upper = match value.checked_add(lower) {
+                    None => {
+                        return Err(CommonError::IsInvalid(
+                            format!("Overflow occurred while determining percentiles")));
+                    },
+                    Some(r) => r
+                };
+                let found = position < upper && position >= lower;
+                lower = upper;
+                if found {
+                    vec.push(*key);
+                    break;
+                }
+            }
+        }
+        Ok(vec)
     }
 }
 
@@ -501,14 +899,8 @@ impl Metrics {
                 // Get the distribution for the given measurement
                 let key = format!("{}{}{}", measurement.label, measurement.unit,
                                   measurement.tags);
-                let mut distribution = match distributions.get_mut(&key) {
-                    Some(d) => d,
-                    None => {
-                        distributions.insert(key.clone(),
-                                             Distribution::from(&measurement));
-                        distributions.get_mut(&key).unwrap()
-                    }
-                };
+                let mut distribution = distributions.entry(key.clone())
+                    .or_insert(Distribution::from(&measurement));
                 if !distribution.values.is_empty() {
                     let time = match distribution.first.checked_add(interval) {
                         None => panic!("Failed to determine distribution duration"),
@@ -552,12 +944,15 @@ impl Metrics {
 
     fn metric_from<F>(
         distribution: &Distribution,
-        callback: &mut Option<F>
+        callback: &mut Option<F>,
     )
         where
             F: FnMut(&Metric) + Send + 'static
     {
-        let metric = Metric::new(distribution);
+        let metric = match Metric::new(distribution) {
+            Ok(m) => m,
+            Err(_) => return //TODO: log an error ....
+        };
         // TODO: log metric...
         if callback.is_some() {
             let callback = callback.as_mut().unwrap();
@@ -620,7 +1015,7 @@ mod tests {
             (String::from(e.0), String::from(e.1))
         }).collect()).unwrap_err();
         match error {
-            CommonError::IsBlank(message) => {
+            CommonError::IsInvalid(message) => {
                 assert_eq!(message, "key in tags is blank")
             }
             _ => {
@@ -696,7 +1091,7 @@ mod tests {
         let error = Measurement::new(
             "\t", -10, unit::quantity(), None).unwrap_err();
         match error {
-            CommonError::IsBlank(message) => {
+            CommonError::IsInvalid(message) => {
                 assert_eq!(message, "label is blank")
             }
             _ => {
@@ -724,7 +1119,7 @@ mod tests {
         let error = Measurement::new(
             "label", -10, "  \n  ", None).unwrap_err();
         match error {
-            CommonError::IsBlank(message) => {
+            CommonError::IsInvalid(message) => {
                 assert_eq!(message, "unit is blank")
             }
             _ => {
@@ -759,7 +1154,7 @@ mod tests {
         let error = Distribution::new(
             "\t ", unit::quantity(), &Tags::new()).unwrap_err();
         match error {
-            CommonError::IsBlank(message) => {
+            CommonError::IsInvalid(message) => {
                 assert_eq!(message, "label is blank")
             }
             _ => {
@@ -787,7 +1182,7 @@ mod tests {
         let error = Distribution::new(
             "label", "\t\n", &Tags::new()).unwrap_err();
         match error {
-            CommonError::IsBlank(message) => {
+            CommonError::IsInvalid(message) => {
                 assert_eq!(message, "unit is blank")
             }
             _ => {

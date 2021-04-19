@@ -193,7 +193,7 @@ mod tests {
     fn worker_error_on_creating_with_blank_name() {
         let error = Worker::new(0, "\t\n", || {}).unwrap_err();
         match error {
-            CommonError::IsBlank(message) => {
+            CommonError::IsInvalid(message) => {
                 assert_eq!(message, "name is blank")
             }
             _ => {

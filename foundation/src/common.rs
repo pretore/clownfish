@@ -4,8 +4,8 @@ use std::collections::HashMap;
 pub enum CommonError {
     /// An empty variable was given.
     IsEmpty(String),
-    /// A blank variable was given.
-    IsBlank(String),
+    /// Is invalid may mean that a string contains whitespace only characters.
+    IsInvalid(String),
 }
 
 fn error_message_is_empty(
@@ -20,18 +20,13 @@ fn error_message_is_blank(
     format!("{} is blank", str)
 }
 
-/// Precondition which is used by [required](required) to perform checks on the
+/// Domain which is used by [required](required) to perform checks on the
 /// passed in types.
-pub trait Precondition {
-    fn if_empty(
-        &self
-    ) -> bool;
-
-    fn if_blank(
-        &self
-    ) -> bool {
-        false
-    }
+pub trait Domain {
+    fn check_domain(
+        &self,
+        name: &'static str,
+    ) -> Result<(), CommonError>;
 }
 
 /// Perform [precondition](Precondition) checks.
@@ -54,74 +49,67 @@ pub trait Precondition {
 /// let v = required(&v, "v");
 /// ```
 ///
-pub fn required<T: Precondition>(
+pub fn required<T: Domain>(
     t: T,
     name: &'static str,
-) -> Result<T, CommonError> {
-    if t.if_empty() {
-        return Err(CommonError::IsEmpty(error_message_is_empty(name)));
-    }
-    if t.if_blank() {
-        return Err(CommonError::IsBlank(error_message_is_blank(name)));
-    }
-    Ok(t)
+) -> Result<(), CommonError> {
+    t.check_domain(name)
 }
 
-impl Precondition for String {
-    fn if_empty(
-        &self
-    ) -> bool {
-        self.is_empty()
-    }
-
-    fn if_blank(
-        &self
-    ) -> bool {
-        self.trim().is_empty()
+impl Domain for &str {
+    fn check_domain(
+        &self,
+        name: &'static str
+    ) -> Result<(), CommonError> {
+        if self.is_empty() {
+            return Err(CommonError::IsEmpty(error_message_is_empty(name)));
+        }
+        if self.trim().is_empty() {
+            return Err(CommonError::IsInvalid(error_message_is_blank(name)));
+        }
+        Ok(())
     }
 }
 
-impl Precondition for &String {
-    fn if_empty(
-        &self
-    ) -> bool {
-        self.is_empty()
-    }
-
-    fn if_blank(
-        &self
-    ) -> bool {
-        self.trim().is_empty()
+impl Domain for &String {
+    fn check_domain(
+        &self,
+        name: &'static str
+    ) -> Result<(), CommonError> {
+        required(self.as_str(), name)
     }
 }
 
-impl Precondition for &str {
-    fn if_empty(
-        &self
-    ) -> bool {
-        self.is_empty()
-    }
-
-    fn if_blank(
-        &self
-    ) -> bool {
-        self.trim().is_empty()
+impl<T> Domain for &[T] {
+    fn check_domain(
+        &self,
+        name: &'static str
+    ) -> Result<(), CommonError> {
+        if self.is_empty() {
+            return Err(CommonError::IsEmpty(error_message_is_empty(name)));
+        }
+        Ok(())
     }
 }
 
-impl<T> Precondition for &Vec<T> {
-    fn if_empty(
-        &self
-    ) -> bool {
-        self.is_empty()
+impl<T> Domain for &Vec<T> {
+    fn check_domain(
+        &self,
+        name: &'static str
+    ) -> Result<(), CommonError> {
+        required(&self[..], name)
     }
 }
 
-impl<K, V> Precondition for &HashMap<K, V> {
-    fn if_empty(
-        &self
-    ) -> bool {
-        self.is_empty()
+impl<K, V> Domain for &HashMap<K, V> {
+    fn check_domain(
+        &self,
+        name: &'static str
+    ) -> Result<(), CommonError> {
+        if self.is_empty() {
+            return Err(CommonError::IsEmpty(error_message_is_empty(name)));
+        }
+        Ok(())
     }
 }
 
@@ -133,7 +121,7 @@ mod tests {
     static ERROR_UNEXPECTED_ERROR: &str = "An unexpected error was returned";
 
     #[test]
-    fn required_error_on_empty_str_reference() {
+    fn required_error_on_empty_str() {
         let error = required("", "str").unwrap_err();
         match error {
             CommonError::IsEmpty(message) => {
@@ -146,10 +134,10 @@ mod tests {
     }
 
     #[test]
-    fn required_error_on_blank_str_reference() {
+    fn required_error_on_blank_str() {
         let error = required(" ", "str").unwrap_err();
         match error {
-            CommonError::IsBlank(message) => {
+            CommonError::IsInvalid(message) => {
                 assert_eq!(message, error_message_is_blank("str"));
             }
             _ => {
@@ -159,46 +147,12 @@ mod tests {
     }
 
     #[test]
-    fn required_succeed_on_str_reference() {
-        assert_eq!(required("test", "str").unwrap(), "test");
+    fn required_succeed_on_str() {
+        required("test", "str").unwrap();
     }
 
     #[test]
     fn required_error_on_empty_string() {
-        let error = required(String::from(""), "string")
-            .unwrap_err();
-        match error {
-            CommonError::IsEmpty(message) => {
-                assert_eq!(message, error_message_is_empty("string"));
-            }
-            _ => {
-                panic!("{}", ERROR_UNEXPECTED_ERROR);
-            }
-        }
-    }
-
-    #[test]
-    fn required_error_on_blank_string() {
-        let error = required(String::from("\r\n"), "string")
-            .unwrap_err();
-        match error {
-            CommonError::IsBlank(message) => {
-                assert_eq!(message, error_message_is_blank("string"));
-            }
-            _ => {
-                panic!("{}", ERROR_UNEXPECTED_ERROR);
-            }
-        }
-    }
-
-    #[test]
-    fn required_succeed_on_string() {
-        assert_eq!(required(String::from("test"), "str").unwrap(),
-                   String::from("test"));
-    }
-
-    #[test]
-    fn required_error_on_empty_string_reference() {
         let s = String::from("");
         let error = required(&s, "s").unwrap_err();
         match error {
@@ -212,11 +166,11 @@ mod tests {
     }
 
     #[test]
-    fn required_error_on_blank_string_reference() {
+    fn required_error_on_blank_string() {
         let s = String::from("\r\n");
         let error = required(&s, "s").unwrap_err();
         match error {
-            CommonError::IsBlank(message) => {
+            CommonError::IsInvalid(message) => {
                 assert_eq!(message, error_message_is_blank("s"));
             }
             _ => {
@@ -226,9 +180,9 @@ mod tests {
     }
 
     #[test]
-    fn required_succeed_on_string_reference() {
+    fn required_succeed_on_string() {
         let s = String::from("test");
-        assert_eq!(required(&s, "s").unwrap(), &String::from("test"));
+        required(&s, "s").unwrap();
     }
 
     #[test]
@@ -248,7 +202,7 @@ mod tests {
     #[test]
     fn required_succeed_on_vec() {
         let v = vec![1, 2];
-        assert_eq!(required(&v, "v").unwrap(), &v);
+        required(&v, "v").unwrap();
     }
 
     #[test]
@@ -271,6 +225,6 @@ mod tests {
             ("ten", 10),
             ("twenty", 20)
         ].iter().copied().collect();
-        assert_eq!(required(&m, "m").unwrap(), &m);
+        required(&m, "m").unwrap();
     }
 }
