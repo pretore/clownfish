@@ -27,8 +27,8 @@ enum MetricsError {
     Overflow(String),
 }
 
-static MEASUREMENT: &str = "Measurement";
-static DISTRIBUTION: &str = "Distribution";
+const MEASUREMENT: &str = "Measurement";
+const DISTRIBUTION: &str = "Distribution";
 
 fn error_message_mismatched_label(
     lhs: (&str /* label */, &str /* type */),
@@ -84,9 +84,9 @@ impl Tags {
     ///
     /// # Errors
     ///
-    /// * [CommonError::isEmpty](CommonError::IsEmpty) if any
+    /// * [CommonError::IsEmpty](CommonError::IsEmpty) if any
     /// _key_ in `tags` is empty.
-    /// * [CommonError::isBlank](CommonError::IsBlank) if any
+    /// * [CommonError::IsInvalid](CommonError::IsInvalid) if any
     /// _key_ in `tags` is blank.
     ///
     /// # Examples
@@ -202,9 +202,9 @@ impl Measurement {
     /// measurements.
     ///
     /// # Errors
-    /// * [CommonError::isEmpty](CommonError::IsEmpty) if
+    /// * [CommonError::IsEmpty](CommonError::IsEmpty) if
     /// `label` or `unit` is empty.
-    /// * [CommonError::isBlank](CommonError::IsBlank) if
+    /// * [CommonError::IsInvalid](CommonError::IsInvalid) if
     /// `label` or `unit` is blank.
     ///
     /// # Examples
@@ -213,7 +213,7 @@ impl Measurement {
     /// use foundation::metrics::unit;
     /// use std::collections::HashMap;
     ///
-    /// let measurement = Measurement::new("cpu_usage", 12, unit::percentage(), None);
+    /// let measurement = Measurement::new("cpu_usage", 12, unit::PERCENTAGE, None);
     /// ```
     pub fn new(
         label: &'static str,
@@ -293,9 +293,9 @@ impl Distribution {
     /// distributions.
     ///
     /// # Errors
-    /// * [CommonError::isEmpty](CommonError::IsEmpty) if
+    /// * [CommonError::IsEmpty](CommonError::IsEmpty) if
     /// `label` or `unit` is empty.
-    /// * [CommonError::isBlank](CommonError::IsBlank) if
+    /// * [CommonError::IsInvalid](CommonError::IsInvalid) if
     /// `label` or `unit` is blank.
     ///
     pub fn new(
@@ -472,7 +472,7 @@ impl Distribution {
 impl Domain for &Distribution {
     fn check_domain(
         &self,
-        name: &'static str
+        name: &'static str,
     ) -> Result<(), CommonError> {
         required(&self.values, name)
     }
@@ -493,32 +493,61 @@ pub struct Metric {
     distribution: BTreeMap<i128, u128>,
     duration: u128,
     at: SystemTime,
-    percentiles: Vec<i128>,
+    percentiles: HashMap<&'static str, i128>,
 }
 
 impl Metric {
-    fn new(distribution: &Distribution) -> Result<Self, CommonError> {
+    const P05: &'static str = "p05";
+    const P25: &'static str = "p25";
+    const P50: &'static str = "p50";
+    const P75: &'static str = "p75";
+    const P90: &'static str = "p90";
+    const P95: &'static str = "p95";
+    const P99: &'static str = "p99";
+    const P99_9: &'static str = "p99.9";
+    const P99_99: &'static str = "p99.99";
+    const P99_999: &'static str = "p99.999";
+    const P99_9999: &'static str = "p99.9999";
+    const P99_99999: &'static str = "p99.99999";
+
+    fn new(
+        distribution: &Distribution
+    ) -> Result<Self, CommonError> {
         required(distribution, "distribution")?;
 
+        let label = distribution.label;
+        let unit = distribution.unit;
+        let at = distribution.last;
         let tags = Metric::tags_from(&distribution.tags);
-        let frequency_distribution = Metric::distribution_from(distribution);
-        let count = Metric::count_from(&frequency_distribution)?;
         let duration = Metric::duration_from(distribution)?;
-        let sum = Metric::sum_from(&frequency_distribution)?;
-        let max = Metric::max_from(&frequency_distribution);
-        let min = Metric::min_from(&frequency_distribution);
-        let mode = Metric::mode_from(&frequency_distribution);
+        let distribution = Metric::distribution_from(distribution);
+        let count = Metric::count_from(&distribution)?;
+        let sum = Metric::sum_from(&distribution)?;
+        let max = Metric::max_from(&distribution);
+        let min = Metric::min_from(&distribution);
+        let mode = Metric::mode_from(&distribution);
         let mean = Metric::mean_from(count, sum);
-        let median = Metric::median_from(count, &frequency_distribution)?;
+        let median = Metric::median_from(count, &distribution)?;
         let percentiles = Metric::percentiles_from(
-            count, &frequency_distribution, vec![
-                5.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0, 99.9, 99.99, 99.999, 99.9999, 99.99999
-            ])?;
+            count, &distribution, [
+                (Metric::P05, 5.0),
+                (Metric::P25, 25.0),
+                (Metric::P50, 50.0),
+                (Metric::P75, 75.0),
+                (Metric::P90, 90.0),
+                (Metric::P95, 95.0),
+                (Metric::P99, 99.0),
+                (Metric::P99_9, 99.9),
+                (Metric::P99_99, 99.99),
+                (Metric::P99_999, 99.999),
+                (Metric::P99_9999, 99.9999),
+                (Metric::P99_99999, 99.99999)
+            ].iter().copied().collect())?;
 
         Ok(Metric {
-            label: distribution.label,
+            label,
             tags,
-            unit: distribution.unit,
+            unit,
             count,
             sum,
             max,
@@ -526,10 +555,10 @@ impl Metric {
             mode,
             mean,
             median,
-            distribution: frequency_distribution,
+            distribution,
             duration,
-            at: distribution.last,
-            percentiles
+            at,
+            percentiles,
         })
     }
 
@@ -613,74 +642,74 @@ impl Metric {
 
     pub fn p05(
         &self
-    ) -> i128 {
-        self.percentiles[0]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P05).unwrap()
     }
 
     pub fn p25(
         &self
-    ) -> i128 {
-        self.percentiles[1]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P25).unwrap()
     }
 
     pub fn p50(
         &self
-    ) -> i128 {
-        self.percentiles[2]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P50).unwrap()
     }
 
     pub fn p75(
         &self
-    ) -> i128 {
-        self.percentiles[3]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P75).unwrap()
     }
 
     pub fn p90(
         &self
-    ) -> i128 {
-        self.percentiles[4]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P90).unwrap()
     }
 
     pub fn p95(
         &self
-    ) -> i128 {
-        self.percentiles[5]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P95).unwrap()
     }
 
     pub fn p99(
         &self
-    ) -> i128 {
-        self.percentiles[6]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P99).unwrap()
     }
 
     pub fn p99_9(
         &self
-    ) -> i128 {
-        self.percentiles[7]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P99_9).unwrap()
     }
 
     pub fn p99_99(
         &self
-    ) -> i128 {
-        self.percentiles[8]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P99_99).unwrap()
     }
 
     pub fn p99_999(
         &self
-    ) -> i128 {
-        self.percentiles[9]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P99_999).unwrap()
     }
 
     pub fn p99_9999(
         &self
-    ) -> i128 {
-        self.percentiles[10]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P99_9999).unwrap()
     }
 
     pub fn p99_99999(
         &self
-    ) -> i128 {
-        self.percentiles[11]
+    ) -> &i128 {
+        self.percentiles.get(Metric::P99_99999).unwrap()
     }
 
     fn tags_from(
@@ -708,7 +737,7 @@ impl Metric {
                 None => {
                     return Err(CommonError::IsInvalid(
                         format!("An overflow occurred while determining count")));
-                },
+                }
                 Some(r) => {
                     count = r;
                 }
@@ -792,14 +821,14 @@ impl Metric {
             let x = match Metric::value_at(i + position, distribution) {
                 None => {
                     return Err(CommonError::IsInvalid(format!("Failed to determine median")));
-                },
+                }
                 Some(r) => r
             };
             sum = match x.checked_add(sum) {
                 None => {
                     return Err(CommonError::IsInvalid(
                         format!("Overflow occurred while determining median")));
-                },
+                }
                 Some(r) => r
             };
         }
@@ -840,37 +869,32 @@ impl Metric {
     fn percentiles_from(
         count: u128,
         distribution: &BTreeMap<i128, u128>,
-        percentiles: Vec<f64>
-    ) -> Result<Vec<i128>, CommonError> {
-        if percentiles.is_empty()
-            || percentiles.iter().next().unwrap() <= &0.0
-            || percentiles.iter().next_back().unwrap() > &100.0 {
-            return Err(CommonError::IsInvalid(
-                format!("Failed to determine percentiles")));
-        }
+        percentiles: BTreeMap<&'static str, f64>,
+    ) -> Result<HashMap<&'static str, i128>, CommonError> {
         let mut it = distribution.iter();
-        let mut vec = Vec::new();
+        let mut map = HashMap::new();
         let mut lower = 0;
-        for percentile in percentiles {
-            let position = percentile / 100.0 * count as f64;
+        for (p_key, p_value) in percentiles {
+            let position = p_value / 100.0 * count as f64;
             let position = position.round() as u128;
             while let Some((key, value)) = it.next() {
                 let upper = match value.checked_add(lower) {
                     None => {
                         return Err(CommonError::IsInvalid(
                             format!("Overflow occurred while determining percentiles")));
-                    },
+                    }
                     Some(r) => r
                 };
                 let found = position < upper && position >= lower;
                 lower = upper;
                 if found {
-                    vec.push(*key);
+                    map.insert(p_key, *key);
                     break;
                 }
             }
+            break;
         }
-        Ok(vec)
+        Ok(map)
     }
 }
 
@@ -955,8 +979,7 @@ impl Metrics {
         };
         // TODO: log metric...
         if callback.is_some() {
-            let callback = callback.as_mut().unwrap();
-            callback(&metric);
+            callback.as_mut().unwrap()(&metric);
         }
     }
 }
@@ -1059,7 +1082,7 @@ mod tests {
     fn measurement_successfully_created_using_new() {
         let l = "label";
         let v = 20;
-        let u = unit::nanoseconds();
+        let u = unit::NANOSECONDS;
         let i = SystemTime::now();
         let m = Measurement::new(
             l, v, u, None).unwrap();
@@ -1075,7 +1098,7 @@ mod tests {
     #[test]
     fn measurement_error_on_creating_with_empty_label() {
         let error = Measurement::new(
-            "", 0, unit::bytes(), None).unwrap_err();
+            "", 0, unit::BYTES, None).unwrap_err();
         match error {
             CommonError::IsEmpty(message) => {
                 assert_eq!(message, "label is empty")
@@ -1089,7 +1112,7 @@ mod tests {
     #[test]
     fn measurement_error_on_creating_with_blank_label() {
         let error = Measurement::new(
-            "\t", -10, unit::quantity(), None).unwrap_err();
+            "\t", -10, unit::QUANTITY, None).unwrap_err();
         match error {
             CommonError::IsInvalid(message) => {
                 assert_eq!(message, "label is blank")
@@ -1131,14 +1154,14 @@ mod tests {
     #[test]
     fn distribution_successfully_created_using_new() {
         let d = Distribution::new(
-            "label", unit::quantity(), &Tags::new()).unwrap();
+            "label", unit::QUANTITY, &Tags::new()).unwrap();
         println!("{:#?}", d);
     }
 
     #[test]
     fn distribution_error_on_creating_with_empty_label() {
         let error = Distribution::new(
-            "", unit::percentage(), &Tags::new()).unwrap_err();
+            "", unit::PERCENTAGE, &Tags::new()).unwrap_err();
         match error {
             CommonError::IsEmpty(message) => {
                 assert_eq!(message, "label is empty")
@@ -1152,7 +1175,7 @@ mod tests {
     #[test]
     fn distribution_error_on_creating_with_blank_label() {
         let error = Distribution::new(
-            "\t ", unit::quantity(), &Tags::new()).unwrap_err();
+            "\t ", unit::QUANTITY, &Tags::new()).unwrap_err();
         match error {
             CommonError::IsInvalid(message) => {
                 assert_eq!(message, "label is blank")
@@ -1194,7 +1217,7 @@ mod tests {
     #[test]
     fn distribution_successfully_created_from_measurement() {
         let m = Measurement::new(
-            "label", 33, unit::quantity(), None)
+            "label", 33, unit::QUANTITY, None)
             .unwrap();
         let d = Distribution::from(&m);
         assert_eq!(m.label, d.label);
@@ -1206,10 +1229,10 @@ mod tests {
     #[test]
     fn distribution_error_on_adding_measurement_with_mismatched_label() {
         let mut d = Distribution::new(
-            "memory_used", unit::bytes(), &Tags::new())
+            "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
         let m = Measurement::new(
-            "memory_free", 20_000, unit::bytes(), None)
+            "memory_free", 20_000, unit::BYTES, None)
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
@@ -1228,10 +1251,10 @@ mod tests {
     #[test]
     fn distribution_error_on_adding_measurement_with_mismatched_unit() {
         let mut d = Distribution::new(
-            "memory_used", unit::bytes(), &Tags::new())
+            "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
         let m = Measurement::new(
-            "memory_used", 20_000, unit::percentage(), None)
+            "memory_used", 20_000, unit::PERCENTAGE, None)
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
@@ -1250,7 +1273,7 @@ mod tests {
     #[test]
     fn distribution_error_on_adding_measurement_with_mismatched_tags() {
         let mut d = Distribution::new(
-            "memory_used", unit::bytes(), &Tags::new())
+            "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
         let t = Tags::from([
             ("service", "me"),
@@ -1259,7 +1282,7 @@ mod tests {
             (String::from(e.0), String::from(e.1))
         }).collect()).unwrap();
         let m = Measurement::new(
-            "memory_used", 20_000, unit::bytes(), Some(&t))
+            "memory_used", 20_000, unit::BYTES, Some(&t))
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
@@ -1278,12 +1301,12 @@ mod tests {
     #[test]
     fn distribution_overflow_error_on_adding_measurement() {
         let mut d = Distribution::new(
-            "memory_used", unit::bytes(), &Tags::new())
+            "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
         let key: i128 = 20_000;
         d.values.insert(key, u128::MAX);
         let m = Measurement::new(
-            "memory_used", key, unit::bytes(), None)
+            "memory_used", key, unit::BYTES, None)
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
@@ -1306,11 +1329,11 @@ mod tests {
     #[test]
     fn distribution_successfully_add_measurement() {
         let mut d = Distribution::new(
-            "memory_used", unit::bytes(), &Tags::new())
+            "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
         let key: i128 = 20_000;
         let m = Measurement::new(
-            "memory_used", key, unit::bytes(), None)
+            "memory_used", key, unit::BYTES, None)
             .unwrap();
         assert!(!d.values.contains_key(&key));
         d.add(&m).unwrap();
@@ -1320,10 +1343,10 @@ mod tests {
     #[test]
     fn distribution_error_on_merge_with_mismatched_label() {
         let mut d = Distribution::new(
-            "memory_used", unit::bytes(), &Tags::new())
+            "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
         let o = Distribution::new(
-            "memory_free", unit::bytes(), &Tags::new())
+            "memory_free", unit::BYTES, &Tags::new())
             .unwrap();
         let error = d.merge(&o).unwrap_err();
         match error {
@@ -1342,10 +1365,10 @@ mod tests {
     #[test]
     fn distribution_error_on_merge_with_mismatched_unit() {
         let mut d = Distribution::new(
-            "memory_used", unit::bytes(), &Tags::new())
+            "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
         let o = Distribution::new(
-            "memory_used", unit::percentage(), &Tags::new())
+            "memory_used", unit::PERCENTAGE, &Tags::new())
             .unwrap();
         let error = d.merge(&o).unwrap_err();
         match error {
@@ -1370,10 +1393,10 @@ mod tests {
             (String::from(e.0), String::from(e.1))
         }).collect()).unwrap();
         let mut d = Distribution::new(
-            "memory_used", unit::bytes(), &t)
+            "memory_used", unit::BYTES, &t)
             .unwrap();
         let o = Distribution::new(
-            "memory_used", unit::bytes(), &Tags::new())
+            "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
         let error = d.merge(&o).unwrap_err();
         match error {

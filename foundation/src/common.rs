@@ -29,14 +29,14 @@ pub trait Domain {
     ) -> Result<(), CommonError>;
 }
 
-/// Perform [precondition](Precondition) checks.
+/// Perform [domain](Domain) checks.
 ///
 /// * `t` is a supported type.
 /// * `name` is the name of the variable.
 ///
 /// # Errors
-/// * [CommonError:isEmpty](CommonError#isEmpty) if `t` is empty.
-/// * [CommonError:isBlank](CommonError#isBlank) if `t` is blank.
+/// * [CommonError::IsEmpty](CommonError::IsEmpty) if `t` is empty.
+/// * [CommonError::IsInvalid](CommonError::IsInvalid) if `t` is invalid.
 ///
 /// # Examples
 /// ```
