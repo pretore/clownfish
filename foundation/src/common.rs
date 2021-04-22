@@ -3,9 +3,10 @@ use std::collections::HashMap;
 #[derive(Debug)]
 pub enum CommonError {
     /// An empty variable was given.
-    IsEmpty(String),
-    /// Is invalid may mean that a string contains whitespace only characters.
-    IsInvalid(String),
+    Empty(String),
+    /// Invalid is for cases where the object is not empty but is not suitable.
+    /// For example a whitespace only string.
+    Invalid(String),
 }
 
 fn error_message_is_empty(
@@ -35,8 +36,8 @@ pub trait Domain {
 /// * `name` is the name of the variable.
 ///
 /// # Errors
-/// * [CommonError::IsEmpty](CommonError::IsEmpty) if `t` is empty.
-/// * [CommonError::IsInvalid](CommonError::IsInvalid) if `t` is invalid.
+/// * [CommonError::Empty](CommonError::Empty) if `t` is empty.
+/// * [CommonError::Invalid](CommonError::Invalid) if `t` is invalid.
 ///
 /// # Examples
 /// ```
@@ -62,10 +63,10 @@ impl Domain for &str {
         name: &'static str
     ) -> Result<(), CommonError> {
         if self.is_empty() {
-            return Err(CommonError::IsEmpty(error_message_is_empty(name)));
+            return Err(CommonError::Empty(error_message_is_empty(name)));
         }
         if self.trim().is_empty() {
-            return Err(CommonError::IsInvalid(error_message_is_blank(name)));
+            return Err(CommonError::Invalid(error_message_is_blank(name)));
         }
         Ok(())
     }
@@ -86,7 +87,7 @@ impl<T> Domain for &[T] {
         name: &'static str
     ) -> Result<(), CommonError> {
         if self.is_empty() {
-            return Err(CommonError::IsEmpty(error_message_is_empty(name)));
+            return Err(CommonError::Empty(error_message_is_empty(name)));
         }
         Ok(())
     }
@@ -107,7 +108,7 @@ impl<K, V> Domain for &HashMap<K, V> {
         name: &'static str
     ) -> Result<(), CommonError> {
         if self.is_empty() {
-            return Err(CommonError::IsEmpty(error_message_is_empty(name)));
+            return Err(CommonError::Empty(error_message_is_empty(name)));
         }
         Ok(())
     }
@@ -124,7 +125,7 @@ mod tests {
     fn required_error_on_empty_str() {
         let error = required("", "str").unwrap_err();
         match error {
-            CommonError::IsEmpty(message) => {
+            CommonError::Empty(message) => {
                 assert_eq!(message, error_message_is_empty("str"));
             }
             _ => {
@@ -137,7 +138,7 @@ mod tests {
     fn required_error_on_blank_str() {
         let error = required(" ", "str").unwrap_err();
         match error {
-            CommonError::IsInvalid(message) => {
+            CommonError::Invalid(message) => {
                 assert_eq!(message, error_message_is_blank("str"));
             }
             _ => {
@@ -156,7 +157,7 @@ mod tests {
         let s = String::from("");
         let error = required(&s, "s").unwrap_err();
         match error {
-            CommonError::IsEmpty(message) => {
+            CommonError::Empty(message) => {
                 assert_eq!(message, error_message_is_empty("s"));
             }
             _ => {
@@ -170,7 +171,7 @@ mod tests {
         let s = String::from("\r\n");
         let error = required(&s, "s").unwrap_err();
         match error {
-            CommonError::IsInvalid(message) => {
+            CommonError::Invalid(message) => {
                 assert_eq!(message, error_message_is_blank("s"));
             }
             _ => {
@@ -190,7 +191,7 @@ mod tests {
         let v: Vec<isize> = Vec::new();
         let error = required(&v, "v").unwrap_err();
         match error {
-            CommonError::IsEmpty(message) => {
+            CommonError::Empty(message) => {
                 assert_eq!(message, error_message_is_empty("v"));
             }
             _ => {
@@ -210,7 +211,7 @@ mod tests {
         let m: HashMap<String, String> = HashMap::new();
         let error = required(&m, "m").unwrap_err();
         match error {
-            CommonError::IsEmpty(message) => {
+            CommonError::Empty(message) => {
                 assert_eq!(message, error_message_is_empty("m"));
             }
             _ => {

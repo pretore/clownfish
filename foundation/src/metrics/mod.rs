@@ -14,15 +14,9 @@ pub mod unit;
 
 #[derive(Debug)]
 enum MetricsError {
-    /// When you are trying to aggregate [measurements](Measurement) or
-    /// [distributions](Distribution) and their `label`s don't match.
-    MismatchedLabel(String),
-    /// When you are trying to aggregate [measurements](Measurement) or
-    /// [distributions](Distribution) and their `unit`s don't match.
-    MismatchedUnit(String),
-    /// When you are trying to aggregate [measurements](Measurement) or
-    /// [distributions](Distribution) and their `tags` don't match.
-    MismatchedTags(String),
+    /// When [measurements](Measurement) or [distributions](Distribution)
+    /// are being aggregated and their `label`s, `tag`s or `unit`s don't match.
+    Unrelated(String),
     /// When an integer overflow error has occurred.
     Overflow(String),
 }
@@ -84,9 +78,9 @@ impl Tags {
     ///
     /// # Errors
     ///
-    /// * [CommonError::IsEmpty](CommonError::IsEmpty) if any
+    /// * [CommonError::Empty](CommonError::Empty) if any
     /// _key_ in `tags` is empty.
-    /// * [CommonError::IsInvalid](CommonError::IsInvalid) if any
+    /// * [CommonError::Invalid](CommonError::Invalid) if any
     /// _key_ in `tags` is blank.
     ///
     /// # Examples
@@ -202,16 +196,15 @@ impl Measurement {
     /// measurements.
     ///
     /// # Errors
-    /// * [CommonError::IsEmpty](CommonError::IsEmpty) if
+    /// * [CommonError::Empty](CommonError::Empty) if
     /// `label` or `unit` is empty.
-    /// * [CommonError::IsInvalid](CommonError::IsInvalid) if
+    /// * [CommonError::Invalid](CommonError::Invalid) if
     /// `label` or `unit` is blank.
     ///
     /// # Examples
     /// ```
     /// use foundation::metrics::{Measurement, Tags};
     /// use foundation::metrics::unit;
-    /// use std::collections::HashMap;
     ///
     /// let measurement = Measurement::new("cpu_usage", 12, unit::PERCENTAGE, None);
     /// ```
@@ -235,28 +228,28 @@ impl Measurement {
         })
     }
 
-    /// Get the `label` of this `Measurement`.
+    /// Get the `label`.
     pub fn label(
         &self
     ) -> &'static str {
         self.label
     }
 
-    /// Get the `value` of this `Measurement`.
+    /// Get the `value`.
     pub fn value(
         &self
     ) -> i128 {
         self.value
     }
 
-    /// Get the `unit` of this `Measurement`.
+    /// Get the `unit`.
     pub fn unit(
         &self
     ) -> &'static str {
         self.unit
     }
 
-    /// Get the `tags` of this `Measurement`.
+    /// Get the `tags`.
     pub fn tags(
         &self
     ) -> &Tags {
@@ -287,15 +280,15 @@ struct Distribution {
 impl Distribution {
     /// Create an empty `Distribution` with the given values.
     ///
-    /// * `label` tells us _what_ we are distribution of.
+    /// * `label` tells us _what_ we are a distribution of.
     /// * `unit` gives us the _type_ of distribution values.
     /// * `tags` allows for classification and grouping of related
     /// distributions.
     ///
     /// # Errors
-    /// * [CommonError::IsEmpty](CommonError::IsEmpty) if
+    /// * [CommonError::Empty](CommonError::Empty) if
     /// `label` or `unit` is empty.
-    /// * [CommonError::IsInvalid](CommonError::IsInvalid) if
+    /// * [CommonError::Invalid](CommonError::Invalid) if
     /// `label` or `unit` is blank.
     ///
     pub fn new(
@@ -339,13 +332,9 @@ impl Distribution {
     /// * `measurement` which will be added to the distribution.
     ///
     /// # Errors
-    /// * [MetricsError::MismatchedLabel](MetricsError::MismatchedLabel) if
-    /// `label` of the measurement does not match the `label` of the
-    /// distribution.
-    /// * [MetricsError::MismatchedUnit](MetricsError::MismatchedUnit) if
-    /// `unit` of the measurement does not match the `unit` of the distribution.
-    /// * [MetricsError::MismatchedTags](MetricsError::MismatchedTags) if
-    /// `tags` of the measurement does not match the `tags` of the distribution.
+    /// * [MetricsError::Unrelated](MetricsError::Unrelated) if `label`, `tags`
+    /// or `unit` of the measurement does not match the `label`, `tags` or
+    /// `unit` of the distribution.
     /// * [MetricsError::Overflow](MetricsError::Overflow) if the measurement
     /// value caused an integer overflow in the distribution.
     ///
@@ -383,15 +372,9 @@ impl Distribution {
     /// * `other` the given distribution whose contents will be merged.
     ///
     /// # Errors
-    /// * [MetricsError::MismatchedLabel](MetricsError::MismatchedLabel) if
-    /// `label` of the given distribution does not match the `label` of this
-    /// distribution.
-    /// * [MetricsError::MismatchedUnit](MetricsError::MismatchedUnit) if
-    /// `unit` of the given distribution does not match the `unit` of this
-    /// distribution.
-    /// * [MetricsError::MismatchedTags](MetricsError::MismatchedTags) if
-    /// `tags` of the given distribution does not match the `tags` of this
-    /// distribution.
+    /// * [MetricsError::Unrelated](MetricsError::Unrelated) if `label`, `tags`
+    /// or `unit` of the given distribution does not match the `label`, `tags`
+    /// or `unit` of this distribution.
     /// * [MetricsError::Overflow](MetricsError::Overflow) if the given
     /// distribution has a value that caused an integer overflow in this
     /// distribution.
@@ -432,21 +415,21 @@ impl Distribution {
         rhs: (&str /*label*/, &str /*unit*/, &Tags, &str /*type*/),
     ) -> Result<(), MetricsError> {
         if lhs.0 != rhs.0 {
-            return Err(MetricsError::MismatchedLabel(
+            return Err(MetricsError::Unrelated(
                 error_message_mismatched_label(
                     (lhs.0, lhs.3),
                     (rhs.0, rhs.3),
                 )));
         }
         if lhs.1 != rhs.1 {
-            return Err(MetricsError::MismatchedUnit(
+            return Err(MetricsError::Unrelated(
                 error_message_mismatched_unit(
                     (lhs.1, lhs.3),
                     (rhs.1, rhs.3),
                 )));
         }
         if lhs.2 != rhs.2 {
-            return Err(MetricsError::MismatchedTags(
+            return Err(MetricsError::Unrelated(
                 error_message_mismatched_tags(
                     (lhs.2, lhs.3),
                     (rhs.2, rhs.3),
@@ -478,6 +461,8 @@ impl Domain for &Distribution {
     }
 }
 
+/// A metric provides you with statistics from the distribution of
+/// [measurements](Measurement) used to create it.
 #[derive(Debug)]
 pub struct Metric {
     label: &'static str,
@@ -514,7 +499,6 @@ impl Metric {
         distribution: &Distribution
     ) -> Result<Self, CommonError> {
         required(distribution, "distribution")?;
-
         let label = distribution.label;
         let unit = distribution.unit;
         let at = distribution.last;
@@ -543,7 +527,6 @@ impl Metric {
                 (Metric::P99_9999, 99.9999),
                 (Metric::P99_99999, 99.99999)
             ].iter().copied().collect())?;
-
         Ok(Metric {
             label,
             tags,
@@ -562,154 +545,259 @@ impl Metric {
         })
     }
 
+    /// Get the `label`.
+    ///
+    /// A label tells us _what_ we are a metric of.
     pub fn label(
         &self
     ) -> &'static str {
         self.label
     }
 
+    /// Get the `tags`.
+    ///
+    /// The tags allows for classification and grouping of related metrics.
     pub fn tags(
         &self
     ) -> &BTreeMap<String, String> {
         &self.tags
     }
 
+    /// Get the `unit`.
+    ///
+    /// A unit gives us the _type_ of metric values.
     pub fn unit(
         &self
     ) -> &'static str {
         self.unit
     }
 
+    /// Get the `count`.
+    ///
+    /// The count represents the number of measurements recorded within the
+    /// distribution of this metric.
     pub fn count(
         &self
     ) -> u128 {
         self.count
     }
 
+    /// Get the `sum`.
+    ///
+    /// The sum is the summation of all the measurements within the
+    /// distribution of this metric.
     pub fn sum(
         &self
     ) -> i128 {
         self.sum
     }
 
+    /// Get the `max`.
+    ///
+    /// The [max](https://en.wikipedia.org/wiki/Sample_maximum_and_minimum) is
+    /// the maximum measurement within the distribution of this metric.
     pub fn max(
         &self
     ) -> i128 {
         self.max
     }
 
+    /// Get the `min`.
+    ///
+    /// The [min](https://en.wikipedia.org/wiki/Sample_maximum_and_minimum) is
+    /// the minimum measurement within the distribution of this metric.
     pub fn min(
         &self
     ) -> i128 {
         self.min
     }
 
+    /// Get the `mode`.
+    ///
+    /// The [mode](https://en.wikipedia.org/wiki/Mode_(statistics)) is the most
+    /// frequently occurring measurement within the distribution of this metric.
     pub fn mode(
         &self
     ) -> &Option<i128> {
         &self.mode
     }
 
+    /// Get the `mean`.
+    ///
+    /// The [mean](https://en.wikipedia.org/wiki/Arithmetic_mean) is the
+    /// average value of all the measurement within the distribution of this
+    /// metric.
     pub fn mean(
         &self
     ) -> i128 {
         self.mean
     }
 
+    /// Get the `median`.
+    ///
+    /// The [median](https://en.wikipedia.org/wiki/Median) is the middle value
+    /// of all the measurement within the distribution of this
+    /// metric.
     pub fn median(
         &self
     ) -> i128 {
         self.median
     }
 
+    /// Get the `distribution`.
+    ///
+    /// The distribution is in a map where the entry's key is the measurement
+    /// and the entry's value is the the number of occurrences observed.
     pub fn distribution(
         &self
     ) -> &BTreeMap<i128, u128> {
         &self.distribution
     }
 
+    /// Get the `duration`.
+    ///
+    /// The duration is the difference in nanoseconds between the first and
+    /// last measurement in the distribution.
     pub fn duration(
         &self
     ) -> u128 {
         self.duration
     }
 
+    /// Get the `at`.
+    ///
+    /// The at is the time at which this metric was formed. If you take the at
+    /// and subtract the duration you will get the time that the first
+    /// measurement was observed in the distribution.
     pub fn at(
         &self
     ) -> &SystemTime {
         &self.at
     }
 
+    /// Get the `p05`.
+    ///
+    /// Return the 5th [percentile](https://en.wikipedia.org/wiki/Percentile)
+    /// of the distribution.
     pub fn p05(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P05).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P05).unwrap()
     }
 
+    /// Get the `p25`.
+    ///
+    /// Return the 25th [percentile](https://en.wikipedia.org/wiki/Percentile)
+    /// of the distribution.
     pub fn p25(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P25).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P25).unwrap()
     }
 
+    /// Get the `p50`.
+    ///
+    /// Return the 50th [percentile](https://en.wikipedia.org/wiki/Percentile)
+    /// of the distribution.
     pub fn p50(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P50).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P50).unwrap()
     }
 
+    /// Get the `p75`.
+    ///
+    /// Return the 75th [percentile](https://en.wikipedia.org/wiki/Percentile)
+    /// of the distribution.
     pub fn p75(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P75).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P75).unwrap()
     }
 
+    /// Get the `p90`.
+    ///
+    /// Return the 90th [percentile](https://en.wikipedia.org/wiki/Percentile)
+    /// of the distribution.
     pub fn p90(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P90).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P90).unwrap()
     }
 
+    /// Get the `p95`.
+    ///
+    /// Return the 95th [percentile](https://en.wikipedia.org/wiki/Percentile)
+    /// of the distribution.
     pub fn p95(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P95).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P95).unwrap()
     }
 
+    /// Get the `p99`.
+    ///
+    /// Return the 99th [percentile](https://en.wikipedia.org/wiki/Percentile)
+    /// of the distribution.
     pub fn p99(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P99).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P99).unwrap()
     }
 
+    /// Get the `p99.9`.
+    ///
+    /// Return the 99.9th
+    /// [percentile](https://en.wikipedia.org/wiki/Percentile) of the
+    /// distribution.
     pub fn p99_9(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P99_9).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P99_9).unwrap()
     }
 
+    /// Get the `p99.99`.
+    ///
+    /// Return the 99.99th
+    /// [percentile](https://en.wikipedia.org/wiki/Percentile) of the
+    /// distribution.
     pub fn p99_99(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P99_99).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P99_99).unwrap()
     }
 
+    /// Get the `p99.999`.
+    ///
+    /// Return the 99.999th
+    /// [percentile](https://en.wikipedia.org/wiki/Percentile) of the
+    /// distribution.
     pub fn p99_999(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P99_999).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P99_999).unwrap()
     }
 
+    /// Get the `p99.9999`.
+    ///
+    /// Return the 99.9999th
+    /// [percentile](https://en.wikipedia.org/wiki/Percentile) of the
+    /// distribution.
     pub fn p99_9999(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P99_9999).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P99_9999).unwrap()
     }
 
+    /// Get the `p99.99999`.
+    ///
+    /// Return the 99.99999th
+    /// [percentile](https://en.wikipedia.org/wiki/Percentile) of the
+    /// distribution.
     pub fn p99_99999(
         &self
-    ) -> &i128 {
-        self.percentiles.get(Metric::P99_99999).unwrap()
+    ) -> i128 {
+        *self.percentiles.get(Metric::P99_99999).unwrap()
     }
 
     fn tags_from(
@@ -735,8 +823,8 @@ impl Metric {
         for (_, value) in distribution {
             match count.checked_add(*value) {
                 None => {
-                    return Err(CommonError::IsInvalid(
-                        format!("An overflow occurred while determining count")));
+                    return Err(CommonError::Invalid(
+                        format!("Overflow occurred while determining count")));
                 }
                 Some(r) => {
                     count = r;
@@ -750,16 +838,20 @@ impl Metric {
         distribution: &BTreeMap<i128, u128>
     ) -> Result<i128, CommonError> {
         let mut sum: i128 = 0;
+        let error = Err(CommonError::Invalid(
+            format!("Overflow occurred while determining sum")));
         for (key, value) in distribution {
+            if *value > i128::MAX as u128 {
+                return error;
+            }
             let x = match key.checked_mul(*value as i128) {
                 None => {
-                    return Err(CommonError::IsInvalid(
-                        format!("An overflow occurred while determining sum")));
+                    return error;
                 }
-                Some(r) => r
+                Some(r) => r,
             };
             match sum.checked_add(x) {
-                None => {}
+                None => return error,
                 Some(r) => {
                     sum = r;
                 }
@@ -820,13 +912,13 @@ impl Metric {
         for i in 0..limit {
             let x = match Metric::value_at(i + position, distribution) {
                 None => {
-                    return Err(CommonError::IsInvalid(format!("Failed to determine median")));
+                    return Err(CommonError::Invalid(format!("Failed to determine median")));
                 }
                 Some(r) => r
             };
             sum = match x.checked_add(sum) {
                 None => {
-                    return Err(CommonError::IsInvalid(
+                    return Err(CommonError::Invalid(
                         format!("Overflow occurred while determining median")));
                 }
                 Some(r) => r
@@ -841,7 +933,7 @@ impl Metric {
         match distribution.last.duration_since(distribution.first) {
             Ok(d) => Ok(d.as_nanos()),
             Err(_) => {
-                Err(CommonError::IsInvalid(
+                Err(CommonError::Invalid(
                     format!("Negative duration is not allowed")))
             }
         }
@@ -874,25 +966,31 @@ impl Metric {
         let mut it = distribution.iter();
         let mut map = HashMap::new();
         let mut lower = 0;
-        for (p_key, p_value) in percentiles {
-            let position = p_value / 100.0 * count as f64;
-            let position = position.round() as u128;
-            while let Some((key, value)) = it.next() {
-                let upper = match value.checked_add(lower) {
-                    None => {
-                        return Err(CommonError::IsInvalid(
-                            format!("Overflow occurred while determining percentiles")));
+        let mut option = it.next();
+        if option.is_some() {
+            for (p_key, p_value) in percentiles {
+                let position = p_value / 100.0 * count as f64;
+                let position = position.ceil() as u128;
+                loop {
+                    let (key, value) = option.unwrap();
+                    let upper = match value.checked_add(lower) {
+                        None => {
+                            return Err(CommonError::Invalid(
+                                format!("Overflow occurred while determining percentiles")));
+                        }
+                        Some(r) => r
+                    };
+                    if position <= upper && position > lower {
+                        map.insert(p_key, *key);
+                        break;
                     }
-                    Some(r) => r
-                };
-                let found = position < upper && position >= lower;
-                lower = upper;
-                if found {
-                    map.insert(p_key, *key);
-                    break;
+                    lower = upper;
+                    option = it.next();
+                    if option.is_none() {
+                        panic!("Unable to determine all the requested percentiles");
+                    }
                 }
             }
-            break;
         }
         Ok(map)
     }
@@ -942,9 +1040,7 @@ impl Metrics {
                     Ok(_) => {}
                     Err(e) => match e {
                         MetricsError::Overflow(_) => continue,
-                        MetricsError::MismatchedLabel(e)
-                        | MetricsError::MismatchedUnit(e)
-                        | MetricsError::MismatchedTags(e) => panic!("{}", e)
+                        MetricsError::Unrelated(e) => panic!("{}", e)
                     }
                 }
             }
@@ -991,6 +1087,8 @@ mod tests {
 
     use crate::common::CommonError;
     use crate::metrics::*;
+    use std::iter::FromIterator;
+    use std::array::IntoIter;
 
     static ERROR_UNEXPECTED_ERROR: &str = "An unexpected error was returned";
 
@@ -1020,7 +1118,7 @@ mod tests {
             (String::from(e.0), String::from(e.1))
         }).collect()).unwrap_err();
         match error {
-            CommonError::IsEmpty(message) => {
+            CommonError::Empty(message) => {
                 assert_eq!(message, "key in tags is empty")
             }
             _ => {
@@ -1038,7 +1136,7 @@ mod tests {
             (String::from(e.0), String::from(e.1))
         }).collect()).unwrap_err();
         match error {
-            CommonError::IsInvalid(message) => {
+            CommonError::Invalid(message) => {
                 assert_eq!(message, "key in tags is blank")
             }
             _ => {
@@ -1100,7 +1198,7 @@ mod tests {
         let error = Measurement::new(
             "", 0, unit::BYTES, None).unwrap_err();
         match error {
-            CommonError::IsEmpty(message) => {
+            CommonError::Empty(message) => {
                 assert_eq!(message, "label is empty")
             }
             _ => {
@@ -1114,7 +1212,7 @@ mod tests {
         let error = Measurement::new(
             "\t", -10, unit::QUANTITY, None).unwrap_err();
         match error {
-            CommonError::IsInvalid(message) => {
+            CommonError::Invalid(message) => {
                 assert_eq!(message, "label is blank")
             }
             _ => {
@@ -1128,7 +1226,7 @@ mod tests {
         let error = Measurement::new(
             "label", 0, "", None).unwrap_err();
         match error {
-            CommonError::IsEmpty(message) => {
+            CommonError::Empty(message) => {
                 assert_eq!(message, "unit is empty")
             }
             _ => {
@@ -1142,7 +1240,7 @@ mod tests {
         let error = Measurement::new(
             "label", -10, "  \n  ", None).unwrap_err();
         match error {
-            CommonError::IsInvalid(message) => {
+            CommonError::Invalid(message) => {
                 assert_eq!(message, "unit is blank")
             }
             _ => {
@@ -1163,7 +1261,7 @@ mod tests {
         let error = Distribution::new(
             "", unit::PERCENTAGE, &Tags::new()).unwrap_err();
         match error {
-            CommonError::IsEmpty(message) => {
+            CommonError::Empty(message) => {
                 assert_eq!(message, "label is empty")
             }
             _ => {
@@ -1177,7 +1275,7 @@ mod tests {
         let error = Distribution::new(
             "\t ", unit::QUANTITY, &Tags::new()).unwrap_err();
         match error {
-            CommonError::IsInvalid(message) => {
+            CommonError::Invalid(message) => {
                 assert_eq!(message, "label is blank")
             }
             _ => {
@@ -1191,7 +1289,7 @@ mod tests {
         let error = Distribution::new(
             "label", "", &Tags::new()).unwrap_err();
         match error {
-            CommonError::IsEmpty(message) => {
+            CommonError::Empty(message) => {
                 assert_eq!(message, "unit is empty")
             }
             _ => {
@@ -1205,7 +1303,7 @@ mod tests {
         let error = Distribution::new(
             "label", "\t\n", &Tags::new()).unwrap_err();
         match error {
-            CommonError::IsInvalid(message) => {
+            CommonError::Invalid(message) => {
                 assert_eq!(message, "unit is blank")
             }
             _ => {
@@ -1236,7 +1334,7 @@ mod tests {
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
-            MetricsError::MismatchedLabel(message) => {
+            MetricsError::Unrelated(message) => {
                 assert_eq!(message, error_message_mismatched_label(
                     (d.label, DISTRIBUTION),
                     (m.label, MEASUREMENT))
@@ -1258,7 +1356,7 @@ mod tests {
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
-            MetricsError::MismatchedUnit(message) => {
+            MetricsError::Unrelated(message) => {
                 assert_eq!(message, error_message_mismatched_unit(
                     (d.unit, DISTRIBUTION),
                     (m.unit, MEASUREMENT))
@@ -1286,7 +1384,7 @@ mod tests {
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
-            MetricsError::MismatchedTags(message) => {
+            MetricsError::Unrelated(message) => {
                 assert_eq!(message, error_message_mismatched_tags(
                     (&d.tags, DISTRIBUTION),
                     (&t, MEASUREMENT))
@@ -1350,7 +1448,7 @@ mod tests {
             .unwrap();
         let error = d.merge(&o).unwrap_err();
         match error {
-            MetricsError::MismatchedLabel(message) => {
+            MetricsError::Unrelated(message) => {
                 assert_eq!(message, error_message_mismatched_label(
                     (d.label, DISTRIBUTION),
                     (o.label, DISTRIBUTION))
@@ -1372,7 +1470,7 @@ mod tests {
             .unwrap();
         let error = d.merge(&o).unwrap_err();
         match error {
-            MetricsError::MismatchedUnit(message) => {
+            MetricsError::Unrelated(message) => {
                 assert_eq!(message, error_message_mismatched_unit(
                     (d.unit, DISTRIBUTION),
                     (o.unit, DISTRIBUTION))
@@ -1400,7 +1498,7 @@ mod tests {
             .unwrap();
         let error = d.merge(&o).unwrap_err();
         match error {
-            MetricsError::MismatchedTags(message) => {
+            MetricsError::Unrelated(message) => {
                 assert_eq!(message, error_message_mismatched_tags(
                     (&d.tags, DISTRIBUTION),
                     (&o.tags, DISTRIBUTION))
@@ -1410,5 +1508,141 @@ mod tests {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
             }
         }
+    }
+
+    #[test]
+    fn metric_error_on_empty_distribution() {
+        let d = Distribution::new(
+            "memory_used", unit::BYTES, &Tags::new())
+            .unwrap();
+        let error = Metric::new(&d).unwrap_err();
+        match error {
+            CommonError::Empty(message) => {
+                assert_eq!(message, "distribution is empty")
+            }
+            _ => {
+                panic!("{}", ERROR_UNEXPECTED_ERROR);
+            }
+        }
+    }
+
+    #[test]
+    fn metric_error_on_negative_duration() {
+        let mut d = Distribution::new(
+            "memory_used", unit::BYTES, &Tags::new())
+            .unwrap();
+        d.values.insert(0, 12);
+        d.last = SystemTime::UNIX_EPOCH;
+        let error = Metric::new(&d).unwrap_err();
+        match error {
+            CommonError::Invalid(message) => {
+                assert_eq!(message, "Negative duration is not allowed")
+            }
+            _ => {
+                panic!("{}", ERROR_UNEXPECTED_ERROR);
+            }
+        }
+    }
+
+    #[test]
+    fn metric_error_on_overflow_count() {
+        let mut d = Distribution::new(
+            "memory_used", unit::BYTES, &Tags::new())
+            .unwrap();
+        d.values.insert(-1, 1);
+        d.values.insert(0, u128::MAX);
+        d.first = SystemTime::UNIX_EPOCH;
+        let error = Metric::new(&d).unwrap_err();
+        match error {
+            CommonError::Invalid(message) => {
+                assert_eq!(message, "Overflow occurred while determining count")
+            }
+            _ => {
+                panic!("{}", ERROR_UNEXPECTED_ERROR);
+            }
+        }
+    }
+
+    #[test]
+    fn metric_error_on_overflow_sum() {
+        let mut d = Distribution::new(
+            "memory_used", unit::BYTES, &Tags::new())
+            .unwrap();
+        // case that sum is a i128 type and can not hold a u128 value
+        d.values.insert(2, u128::MAX);
+        d.first = SystemTime::UNIX_EPOCH;
+        let error = Metric::new(&d).unwrap_err();
+        match error {
+            CommonError::Invalid(message) => {
+                assert_eq!(message, "Overflow occurred while determining sum")
+            }
+            _ => {
+                panic!("{}", ERROR_UNEXPECTED_ERROR);
+            }
+        }
+        d.values.clear();
+        // case that key multiplied by value causes an overflow
+        d.values.insert(2, i128::MAX as u128);
+        let error = Metric::new(&d).unwrap_err();
+        match error {
+            CommonError::Invalid(message) => {
+                assert_eq!(message, "Overflow occurred while determining sum")
+            }
+            _ => {
+                panic!("{}", ERROR_UNEXPECTED_ERROR);
+            }
+        }
+        d.values.clear();
+        // case when we add all the distribution entries causes an overflow
+        d.values.insert(1, i128::MAX as u128);
+        d.values.insert(2, (i128::MAX / 2) as u128);
+        d.values.insert(3, 1);
+        let error = Metric::new(&d).unwrap_err();
+        match error {
+            CommonError::Invalid(message) => {
+                assert_eq!(message, "Overflow occurred while determining sum")
+            }
+            _ => {
+                panic!("{}", ERROR_UNEXPECTED_ERROR);
+            }
+        }
+    }
+
+    #[test]
+    fn metric_successfully_created_using_new() {
+        let mut d = Distribution::new(
+            "memory_used", unit::BYTES, &Tags::new())
+            .unwrap();
+        d.values.insert(1, 7);
+        d.values.insert(2, 17);
+        d.values.insert(8, 5);
+        d.first = SystemTime::UNIX_EPOCH;
+        let m = Metric::new(&d).unwrap();
+        assert_eq!(d.label, m.label());
+        assert_eq!(d.unit, m.unit());
+        assert!(m.tags().is_empty());
+        assert_eq!(d.last.duration_since(d.first).unwrap().as_nanos(), m.duration());
+        assert_eq!(&d.last, m.at());
+        assert_eq!(&BTreeMap::from_iter(IntoIter::new([(1, 7), (2, 17), (8, 5)])),
+                   m.distribution());
+        assert_eq!(29, m.count());
+        assert_eq!(81, m.sum());
+        assert_eq!(8, m.max());
+        assert_eq!(1, m.min());
+        assert_eq!(2, m.mode().unwrap());
+        assert_eq!(2, m.mean());
+        assert_eq!(2, m.median());
+        assert_eq!(1, m.p05());
+        assert_eq!(2, m.p25());
+        assert_eq!(2, m.p50());
+        assert_eq!(2, m.p75());
+        assert_eq!(8, m.p90());
+        assert_eq!(8, m.p95());
+        assert_eq!(8, m.p99());
+        assert_eq!(8, m.p99_9());
+        assert_eq!(8, m.p99_99());
+        assert_eq!(8, m.p99_999());
+        assert_eq!(8, m.p99_9999());
+        assert_eq!(8, m.p99_99999());
     }
 }
