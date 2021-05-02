@@ -1,111 +1,103 @@
+use std::{error, fmt};
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::{Display, Formatter};
-use std::fmt;
+use std::convert::TryFrom;
+use std::fmt::{Debug, Display, Formatter};
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, Instant};
 
 use crate::common::{CommonError, Domain, required};
-use crate::foundation::executor;
+use crate::executor;
 
-/// Unit represents the type of a value in [measurements](Measurement)
+/// Unit represents the _type_ of a value in [measurements](Measurement)
 /// and [metrics](Metric).
 pub mod unit;
 
 #[derive(Debug)]
 enum MetricsError {
+    Common(CommonError),
+    /// When an integer overflow error has occurred.
+    Overflow(String /* message */),
     /// When [measurements](Measurement) or [distributions](Distribution)
     /// are being aggregated and their `label`s, `tag`s or `unit`s don't match.
-    Unrelated(String),
-    /// When an integer overflow error has occurred.
-    Overflow(String),
+    Unrelated(&'static str, /* measurement or distribution */
+              &'static str, /* label, tags or unit */
+              String, /* value */
+              &'static str, /* measurement or distribution */
+              String /* value */),
+    /// When the duration is calculated for the [distributions](Distribution)
+    /// and it is negative.
+    NegativeDuration(String /* identity */),
+    /// When a position is given that does not map to a value in the
+    /// [distributions](Distribution)
+    NotFound(u128, /* position */
+             String /* identity */),
 }
 
-const MEASUREMENT: &str = "Measurement";
-const DISTRIBUTION: &str = "Distribution";
-
-fn error_message_mismatched_label(
-    lhs: (&str /* label */, &str /* type */),
-    rhs: (&str /* label */, &str /* type */),
-) -> String {
-    format!("LHS: {} with label of \"{}\" != RHS: {} with label of \"{}\"",
-            lhs.1, lhs.0, rhs.1, rhs.0)
+impl error::Error for MetricsError {
+    fn source(
+        &self
+    ) -> Option<&(dyn error::Error + 'static)> {
+        match *self {
+            MetricsError::Common(ref e) => Some(e),
+            _ => None
+        }
+    }
 }
 
-fn error_message_mismatched_unit(
-    lhs: (&str /* unit */, &str /* type */),
-    rhs: (&str /* unit */, &str /* type */),
-) -> String {
-    format!("LHS: {} with unit of \"{}\" != RHS: {} with unit of \"{}\"",
-            lhs.1, lhs.0, rhs.1, rhs.0)
+impl Display for MetricsError {
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>,
+    ) -> fmt::Result {
+        match *self {
+            MetricsError::Common(ref error) =>
+                write!(f, "{}", error),
+            MetricsError::Unrelated(a1, a2, ref a3, b1, ref b2) =>
+                write!(f, "{0} with {1} of {2} is unrelated to {3} with {1} of {4}",
+                       a1, a2, a3, b1, b2),
+            MetricsError::Overflow(ref message) =>
+                write!(f, "{}", message),
+            MetricsError::NegativeDuration(ref identity) =>
+                write!(f, "Negative duration was recorded for {} of {}",
+                       DISTRIBUTION, identity),
+            MetricsError::NotFound(position, ref identity) =>
+                write!(f, "Position of {} was not found for values in {} of {}",
+                       position, DISTRIBUTION, identity)
+        }
+    }
 }
 
-fn error_message_mismatched_tags(
-    lhs: (&Tags, &str /* type */),
-    rhs: (&Tags, &str /* type */),
-) -> String {
-    format!("LHS: {} with tags of \"{}\" != RHS: {} with tags of \"{}\"",
-            lhs.1, lhs.0, rhs.1, rhs.0)
+impl From<CommonError> for MetricsError {
+    fn from(
+        error: CommonError
+    ) -> Self {
+        MetricsError::Common(error)
+    }
 }
 
-fn error_message_overflow(
-    op: &str,
-    key: &i128,
-    label: &str,
-    unit: &str,
+const MEASUREMENT: &str = "measurement";
+const DISTRIBUTION: &str = "distribution";
+
+fn identity(
+    label: &'static str,
     tags: &Tags,
+    unit: &'static str,
 ) -> String {
-    format!("Overflow {} key of \"{}\" for {} with label: {}, \
-             unit: {} and tags: {}", op, key, DISTRIBUTION, label, unit, tags)
+    format!("label={} tags={} unit={}", label, tags.to_string(), unit)
 }
 
 /// Tags are string key value pairs used to classify and quantify
 /// [measurements](Measurement) and [metrics](Metric).
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Tags {
-    entries: BTreeMap<String, String>
+    entries: BTreeMap<String, String>,
 }
 
 impl Tags {
     /// Create an empty `Tags`.
     pub fn new() -> Self {
         Default::default()
-    }
-
-    /// Create a `Tags` using the given map.
-    ///
-    /// * tags whose contents will be used to populate the instance.
-    ///
-    /// # Errors
-    ///
-    /// * [CommonError::Empty](CommonError::Empty) if any
-    /// _key_ in `tags` is empty.
-    /// * [CommonError::Invalid](CommonError::Invalid) if any
-    /// _key_ in `tags` is blank.
-    ///
-    /// # Examples
-    /// ```
-    /// use foundation::metrics::Tags;
-    ///
-    /// let tags = Tags::from([
-    ///     ("service", "awesome"),
-    ///     ("hostname", "localhost")
-    /// ].iter().map(|e| {
-    ///   (String::from(e.0), String::from(e.1))
-    /// }).collect()).unwrap();
-    /// ```
-    pub fn from(
-        tags: HashMap<String, String>
-    ) -> Result<Self, CommonError> {
-        required(&tags, "tags")?;
-        let mut map = BTreeMap::new();
-        for (key, value) in &tags {
-            required(key, "key in tags")?;
-            map.insert(key.clone(), value.clone());
-        }
-        Ok(Tags {
-            entries: map
-        })
     }
 
     /// Merge two `Tags` together.
@@ -116,20 +108,22 @@ impl Tags {
     /// # Examples
     /// ```
     /// use foundation::metrics::Tags;
+    /// use std::convert::TryFrom;
+    /// use std::collections::HashMap;
     ///
-    /// let mut tags = Tags::from([
+    /// let mut tags = Tags::try_from([
     ///     ("service", "awesome"),
     ///     ("hostname", "localhost")
     /// ].iter().map(|e| {
     ///   (String::from(e.0), String::from(e.1))
-    /// }).collect()).unwrap();
+    /// }).collect::<HashMap<String, String>>()).unwrap();
     ///
-    /// let other = Tags::from([
+    /// let other = Tags::try_from([
     ///     ("service", "other"),
     ///     ("component", "application")
     /// ].iter().map(|e| {
     ///   (String::from(e.0), String::from(e.1))
-    /// }).collect()).unwrap();
+    /// }).collect::<HashMap<String, String>>()).unwrap();
     /// // 'component' will be added and 'service' will not be overwritten.
     /// tags.merge(&other);
     /// ```
@@ -146,7 +140,49 @@ impl Tags {
     }
 }
 
-impl Display for Tags {
+impl TryFrom<HashMap<String, String>> for Tags {
+    type Error = CommonError;
+
+    /// Attempt to create a `Tags` from the given map.
+    ///
+    /// * tags whose contents will be used to populate the instance.
+    ///
+    /// # Errors
+    ///
+    /// * [CommonError::Empty](CommonError::Empty) if any
+    /// _key_ in `tags` is empty.
+    /// * [CommonError::Blank](CommonError::Blank) if any
+    /// _key_ in `tags` is blank.
+    ///
+    /// # Examples
+    /// ```
+    /// use foundation::metrics::Tags;
+    /// use std::convert::TryFrom;
+    /// use std::collections::HashMap;
+    ///
+    /// let tags = Tags::try_from([
+    ///     ("service", "awesome"),
+    ///     ("hostname", "localhost")
+    /// ].iter().map(|e| {
+    ///   (String::from(e.0), String::from(e.1))
+    /// }).collect::<HashMap<String, String>>()).unwrap();
+    /// ```
+    fn try_from(
+        tags: HashMap<String, String>
+    ) -> Result<Self, Self::Error> {
+        required(&tags, "tags")?;
+        let mut map = BTreeMap::new();
+        for (key, value) in &tags {
+            required(key, "key")?;
+            map.insert(key.clone(), value.clone());
+        }
+        Ok(Tags {
+            entries: map
+        })
+    }
+}
+
+impl Debug for Tags {
     fn fmt(
         &self,
         f: &mut Formatter<'_>,
@@ -154,6 +190,26 @@ impl Display for Tags {
         f.debug_map()
             .entries(&self.entries)
             .finish()
+    }
+}
+
+impl Display for Tags {
+    fn fmt(
+        &self,
+        f: &mut Formatter<'_>,
+    ) -> fmt::Result {
+        let mut output = String::new();
+        self.entries
+            .iter()
+            .map(|e| format!("{}={}", e.0, e.1))
+            .fold(true, |first, e| {
+                if !first {
+                    output.push_str(", ");
+                }
+                output.push_str(&*e);
+                false
+            });
+        write!(f, "{{{}}}", output)
     }
 }
 
@@ -198,7 +254,7 @@ impl Measurement {
     /// # Errors
     /// * [CommonError::Empty](CommonError::Empty) if
     /// `label` or `unit` is empty.
-    /// * [CommonError::Invalid](CommonError::Invalid) if
+    /// * [CommonError::Blank](CommonError::Blank) if
     /// `label` or `unit` is blank.
     ///
     /// # Examples
@@ -226,6 +282,32 @@ impl Measurement {
             },
             at: SystemTime::now(),
         })
+    }
+
+    /// Create a `Measurement` from the duration of executing the given closure.
+    ///
+    /// The closure's duration will be reported in
+    /// [nanoseconds](unit::NANOSECONDS) with the given `label` and `tags`.
+    ///
+    /// * `label` tells us _what_ we are measuring.
+    /// * `tags` allows for classification and grouping of related
+    /// measurements.
+    ///
+    /// # Errors
+    /// * [CommonError::Empty](CommonError::Empty) if `label` is empty.
+    /// * [CommonError::Blank](CommonError::Blank) if `label` is blank.
+    pub fn from_closure<F>(
+        label: &'static str,
+        tags: Option<&Tags>,
+        mut callable: F,
+    ) -> Result<Self, CommonError>
+        where
+            F: FnMut() + Send + 'static
+    {
+        let start = Instant::now();
+        callable();
+        let duration = Instant::now().duration_since(start);
+        Measurement::new(label, duration.as_nanos() as i128, unit::NANOSECONDS, tags)
     }
 
     /// Get the `label`.
@@ -273,8 +355,8 @@ struct Distribution {
     unit: &'static str,
     tags: Tags,
     values: HashMap<i128, u128>,
-    first: SystemTime,
-    last: SystemTime,
+    first: Option<SystemTime>,
+    last: Option<SystemTime>,
 }
 
 impl Distribution {
@@ -288,7 +370,7 @@ impl Distribution {
     /// # Errors
     /// * [CommonError::Empty](CommonError::Empty) if
     /// `label` or `unit` is empty.
-    /// * [CommonError::Invalid](CommonError::Invalid) if
+    /// * [CommonError::Blank](CommonError::Blank) if
     /// `label` or `unit` is blank.
     ///
     pub fn new(
@@ -298,33 +380,14 @@ impl Distribution {
     ) -> Result<Self, CommonError> {
         required(label, "label")?;
         required(unit, "unit")?;
-        let now = SystemTime::now();
         Ok(Distribution {
             label,
             unit,
             tags: tags.clone(),
             values: HashMap::new(),
-            first: now.clone(),
-            last: now,
+            first: None,
+            last: None,
         })
-    }
-
-    /// Create an empty `Distribution` from the given measurement.
-    ///
-    /// * `measurement` which will be used to create the distribution.
-    ///
-    pub fn from(
-        measurement: &Measurement
-    ) -> Self {
-        let now = SystemTime::now();
-        Distribution {
-            label: measurement.label,
-            unit: measurement.unit,
-            tags: measurement.tags.clone(),
-            values: HashMap::new(),
-            first: now.clone(),
-            last: now,
-        }
     }
 
     /// Add the given measurement to the `Distribution`.
@@ -342,28 +405,25 @@ impl Distribution {
         &mut self,
         measurement: &Measurement,
     ) -> Result<(), MetricsError> {
-        Distribution::if_related(
+        Distribution::error_if_unrelated(
             (self.label, self.unit, &self.tags, DISTRIBUTION),
             (measurement.label, measurement.unit, &measurement.tags, MEASUREMENT),
         )?;
-        let count = self.values.entry(measurement.value)
+        let count = self.values
+            .entry(measurement.value)
             .or_insert(0);
         match count.checked_add(1) {
-            None => {
-                return Err(MetricsError::Overflow(
-                    error_message_overflow(
-                        "incrementing",
-                        &measurement.value,
-                        self.label,
-                        self.unit,
-                        &self.tags,
-                    )));
-            }
-            Some(sum) => {
-                *count = sum;
-            }
+            Some(sum) => *count = sum,
+            None => return Err(MetricsError::Overflow(
+                Distribution::error_message_for_overflow(
+                    "incrementing",
+                    &measurement.value,
+                    self.label,
+                    &self.tags,
+                    self.unit))),
         }
-        self.update_duration(&measurement.at, &measurement.at);
+        let at = Some(measurement.at);
+        self.update_duration(&at, &at);
         Ok(())
     }
 
@@ -382,27 +442,24 @@ impl Distribution {
         &mut self,
         other: &Self,
     ) -> Result<(), MetricsError> {
-        Distribution::if_related(
+        Distribution::error_if_unrelated(
             (self.label, self.unit, &self.tags, DISTRIBUTION),
             (other.label, other.unit, &other.tags, DISTRIBUTION),
         )?;
         let mut values = self.values.clone();
         for (key, value) in &other.values {
-            let count = values.entry(*key).or_insert(0);
+            let count = values
+                .entry(*key)
+                .or_insert(0);
             match count.checked_add(*value) {
-                None => {
-                    return Err(MetricsError::Overflow(
-                        error_message_overflow(
-                            "merging",
-                            key,
-                            self.label,
-                            self.unit,
-                            &self.tags,
-                        )));
-                }
-                Some(sum) => {
-                    *count = sum;
-                }
+                Some(sum) => *count = sum,
+                None => return Err(MetricsError::Overflow(
+                    Distribution::error_message_for_overflow(
+                        "merging",
+                        key,
+                        self.label,
+                        &self.tags,
+                        self.unit)))
             }
         }
         self.values = values;
@@ -410,44 +467,65 @@ impl Distribution {
         Ok(())
     }
 
-    fn if_related(
-        lhs: (&str /*label*/, &str /*unit*/, &Tags, &str /*type*/),
-        rhs: (&str /*label*/, &str /*unit*/, &Tags, &str /*type*/),
+    fn error_if_unrelated(
+        lhs: (&'static str /*label*/, &'static str /*unit*/, &Tags, &'static str /*type*/),
+        rhs: (&'static str /*label*/, &'static str /*unit*/, &Tags, &'static str /*type*/),
     ) -> Result<(), MetricsError> {
         if lhs.0 != rhs.0 {
             return Err(MetricsError::Unrelated(
-                error_message_mismatched_label(
-                    (lhs.0, lhs.3),
-                    (rhs.0, rhs.3),
-                )));
+                lhs.3, "label", lhs.0.to_string(), rhs.3, rhs.0.to_string()));
         }
         if lhs.1 != rhs.1 {
             return Err(MetricsError::Unrelated(
-                error_message_mismatched_unit(
-                    (lhs.1, lhs.3),
-                    (rhs.1, rhs.3),
-                )));
+                lhs.3, "unit", lhs.1.to_string(), rhs.3, rhs.1.to_string()));
         }
         if lhs.2 != rhs.2 {
             return Err(MetricsError::Unrelated(
-                error_message_mismatched_tags(
-                    (lhs.2, lhs.3),
-                    (rhs.2, rhs.3),
-                )));
+                lhs.3, "tags", lhs.2.to_string(), rhs.3, rhs.2.to_string()));
         }
         Ok(())
     }
 
+    fn error_message_for_overflow(
+        op: &'static str,
+        key: &i128,
+        label: &'static str,
+        tags: &Tags,
+        unit: &'static str,
+    ) -> String {
+        format!("Overflow occurred while {} key of {} for {} of {}",
+                op, key, DISTRIBUTION, identity(label, tags, unit))
+    }
+
     fn update_duration(
         &mut self,
-        first: &SystemTime,
-        last: &SystemTime,
+        first: &Option<SystemTime>,
+        last: &Option<SystemTime>,
     ) {
-        if self.first.gt(first) {
-            self.first = first.clone();
+        if self.first.is_none() || self.first.gt(first) {
+            self.first = *first;
         }
-        if self.last.lt(last) {
-            self.last = last.clone();
+        if self.last.is_none() || self.last.lt(last) {
+            self.last = *last;
+        }
+    }
+}
+
+impl From<&Measurement> for Distribution {
+    /// Create an empty `Distribution` from the given measurement.
+    ///
+    /// * `measurement` which will be used to create the distribution.
+    ///
+    fn from(
+        measurement: &Measurement
+    ) -> Self {
+        Distribution {
+            label: measurement.label,
+            unit: measurement.unit,
+            tags: measurement.tags.clone(),
+            values: HashMap::new(),
+            first: None,
+            last: None,
         }
     }
 }
@@ -497,21 +575,22 @@ impl Metric {
 
     fn new(
         distribution: &Distribution
-    ) -> Result<Self, CommonError> {
+    ) -> Result<Self, MetricsError> {
         required(distribution, "distribution")?;
         let label = distribution.label;
         let unit = distribution.unit;
-        let at = distribution.last;
+        let at = distribution.last.unwrap();
+        let identity = identity(label, &distribution.tags, unit);
         let tags = Metric::tags_from(&distribution.tags);
-        let duration = Metric::duration_from(distribution)?;
+        let duration = Metric::duration_from(distribution, &identity)?;
         let distribution = Metric::distribution_from(distribution);
-        let count = Metric::count_from(&distribution)?;
-        let sum = Metric::sum_from(&distribution)?;
+        let count = Metric::count_from(&distribution, &identity)?;
+        let sum = Metric::sum_from(&distribution, &identity)?;
         let max = Metric::max_from(&distribution);
         let min = Metric::min_from(&distribution);
         let mode = Metric::mode_from(&distribution);
         let mean = Metric::mean_from(count, sum);
-        let median = Metric::median_from(count, &distribution)?;
+        let median = Metric::median_from(count, &distribution, &identity)?;
         let percentiles = Metric::percentiles_from(
             count, &distribution, [
                 (Metric::P05, 5.0),
@@ -526,7 +605,7 @@ impl Metric {
                 (Metric::P99_999, 99.999),
                 (Metric::P99_9999, 99.9999),
                 (Metric::P99_99999, 99.99999)
-            ].iter().copied().collect())?;
+            ].iter().copied().collect(), &identity)?;
         Ok(Metric {
             label,
             tags,
@@ -565,7 +644,7 @@ impl Metric {
 
     /// Get the `unit`.
     ///
-    /// A unit gives us the _type_ of metric values.
+    /// A [unit](mod@unit) gives us the _type_ of metric values.
     pub fn unit(
         &self
     ) -> &'static str {
@@ -817,44 +896,36 @@ impl Metric {
     }
 
     fn count_from(
-        distribution: &BTreeMap<i128, u128>
-    ) -> Result<u128, CommonError> {
+        distribution: &BTreeMap<i128, u128>,
+        identity: &str,
+    ) -> Result<u128, MetricsError> {
         let mut count: u128 = 0;
-        for (_, value) in distribution {
+        for value in distribution.values() {
             match count.checked_add(*value) {
-                None => {
-                    return Err(CommonError::Invalid(
-                        format!("Overflow occurred while determining count")));
-                }
-                Some(r) => {
-                    count = r;
-                }
+                Some(r) => count = r,
+                None => return Err(MetricsError::Overflow(
+                    Metric::error_message_for_overflow("count", identity)))
             }
         }
         Ok(count)
     }
 
     fn sum_from(
-        distribution: &BTreeMap<i128, u128>
-    ) -> Result<i128, CommonError> {
+        distribution: &BTreeMap<i128, u128>,
+        identity: &str,
+    ) -> Result<i128, MetricsError> {
         let mut sum: i128 = 0;
-        let error = Err(CommonError::Invalid(
-            format!("Overflow occurred while determining sum")));
         for (key, value) in distribution {
             if *value > i128::MAX as u128 {
-                return error;
+                return Err(Metric::error_for_overflow_in_sum(identity));
             }
             let x = match key.checked_mul(*value as i128) {
-                None => {
-                    return error;
-                }
                 Some(r) => r,
+                None => return Err(Metric::error_for_overflow_in_sum(identity))
             };
             match sum.checked_add(x) {
-                None => return error,
-                Some(r) => {
-                    sum = r;
-                }
+                Some(r) => sum = r,
+                None => return Err(Metric::error_for_overflow_in_sum(identity))
             }
         }
         Ok(sum)
@@ -905,64 +976,60 @@ impl Metric {
     fn median_from(
         count: u128,
         distribution: &BTreeMap<i128, u128>,
-    ) -> Result<i128, CommonError> {
+        identity: &str,
+    ) -> Result<i128, MetricsError> {
         let mut sum = 0;
         let position = count / 2;
         let limit = 1 + count % 2;
         for i in 0..limit {
-            let x = match Metric::value_at(i + position, distribution) {
-                None => {
-                    return Err(CommonError::Invalid(format!("Failed to determine median")));
-                }
-                Some(r) => r
-            };
+            let x = Metric::nearest_rank(i + position, distribution, identity)?;
             sum = match x.checked_add(sum) {
-                None => {
-                    return Err(CommonError::Invalid(
-                        format!("Overflow occurred while determining median")));
-                }
-                Some(r) => r
+                Some(r) => r,
+                None => return Err(MetricsError::Overflow(
+                    Metric::error_message_for_overflow("median", identity)))
             };
         }
         Ok(sum / limit as i128)
     }
 
     fn duration_from(
-        distribution: &Distribution
-    ) -> Result<u128, CommonError> {
-        match distribution.last.duration_since(distribution.first) {
+        distribution: &Distribution,
+        identity: &str,
+    ) -> Result<u128, MetricsError> {
+        let last = distribution.last.unwrap();
+        let first = distribution.first.unwrap();
+        match last.duration_since(first) {
             Ok(d) => Ok(d.as_nanos()),
-            Err(_) => {
-                Err(CommonError::Invalid(
-                    format!("Negative duration is not allowed")))
-            }
+            Err(_) => Err(MetricsError::NegativeDuration(identity.to_string()))
         }
-    }
-
-    fn value_at(
-        position: u128,
-        distribution: &BTreeMap<i128, u128>,
-    ) -> Option<i128> {
-        let mut lower = 0;
-        for (key, value) in distribution {
-            let upper = match value.checked_add(lower) {
-                None => return None,
-                Some(r) => r
-            };
-            if position < upper && position >= lower {
-                return Some(*key);
-            }
-            lower = upper;
-        }
-        None
     }
 
     // https://en.wikipedia.org/wiki/Percentile#The_nearest-rank_method
+    fn nearest_rank(
+        position: u128,
+        distribution: &BTreeMap<i128, u128>,
+        identity: &str,
+    ) -> Result<i128, MetricsError> {
+        let mut lower = 0;
+        for (key, value) in distribution {
+            let upper = match value.checked_add(lower) {
+                Some(r) => r,
+                None => return Err(Metric::error_for_overflow_in_nearest_rank(position, identity))
+            };
+            if position <= upper && position >= lower {
+                return Ok(*key);
+            }
+            lower = upper;
+        }
+        Err(MetricsError::NotFound(position, identity.to_string()))
+    }
+
     fn percentiles_from(
         count: u128,
         distribution: &BTreeMap<i128, u128>,
         percentiles: BTreeMap<&'static str, f64>,
-    ) -> Result<HashMap<&'static str, i128>, CommonError> {
+        identity: &str,
+    ) -> Result<HashMap<&'static str, i128>, MetricsError> {
         let mut it = distribution.iter();
         let mut map = HashMap::new();
         let mut lower = 0;
@@ -974,11 +1041,9 @@ impl Metric {
                 loop {
                     let (key, value) = option.unwrap();
                     let upper = match value.checked_add(lower) {
-                        None => {
-                            return Err(CommonError::Invalid(
-                                format!("Overflow occurred while determining percentiles")));
-                        }
-                        Some(r) => r
+                        Some(r) => r,
+                        None => return Err(Metric::error_for_overflow_in_percentiles(
+                            p_key, identity))
                     };
                     if position <= upper && position > lower {
                         map.insert(p_key, *key);
@@ -994,17 +1059,56 @@ impl Metric {
         }
         Ok(map)
     }
+
+    fn error_message_for_overflow(
+        op: &str,
+        identity: &str,
+    ) -> String {
+        format!("An overflow occurred while determining {} from {} of {}",
+                op, DISTRIBUTION, identity)
+    }
+
+    fn error_for_overflow_in_sum(
+        identity: &str
+    ) -> MetricsError {
+        MetricsError::Overflow(
+            Metric::error_message_for_overflow("sum", identity))
+    }
+
+    fn error_for_overflow_in_nearest_rank(
+        position: u128,
+        identity: &str,
+    ) -> MetricsError {
+        MetricsError::Overflow(Metric::error_message_for_overflow(
+            &*format!("nearest rank of {} ", position), identity)
+        )
+    }
+
+    fn error_for_overflow_in_percentiles(
+        percentile: &'static str,
+        identity: &str,
+    ) -> MetricsError {
+        MetricsError::Overflow(Metric::error_message_for_overflow(
+            &*format!("percentile of {} ", percentile), identity)
+        )
+    }
 }
 
+/// Metrics is the way by which you submit [measurements](Measurement) to
+/// become [metrics](Metric).
 #[derive(Debug)]
 pub struct Metrics {
-    tx: Sender<Measurement>
+    tx: Sender<Measurement>,
 }
 
 impl Metrics {
+    /// Create a new `Metrics` handle with the given interval and callback.
+    ///
+    /// * `interval` the maximum time that a metric can span.
+    /// * `callback` that is invoked with the newly created metric passed in.
     pub fn new<F>(
         interval: Duration,
-        mut callback: Option<F>,
+        mut callback: F,
     ) -> Self
         where
             F: FnMut(&Metric) + Send + 'static
@@ -1012,21 +1116,17 @@ impl Metrics {
         let (tx, rx): (Sender<Measurement>, Receiver<Measurement>) = mpsc::channel();
         executor().submit(move || {
             let mut distributions: HashMap<String, Distribution> = HashMap::new();
-            loop {
-                // Retrieve the measurement
-                let measurement = match rx.recv() {
-                    Ok(m) => m,
-                    Err(_) => break
-                };
+            while let Ok(measurement) = rx.recv() {
                 // Get the distribution for the given measurement
-                let key = format!("{}{}{}", measurement.label, measurement.unit,
-                                  measurement.tags);
+                let key = format!("{}{}{}", measurement.label, measurement.tags,
+                                  measurement.unit);
                 let mut distribution = distributions.entry(key.clone())
-                    .or_insert(Distribution::from(&measurement));
+                    .or_insert_with(|| Distribution::from(&measurement));
                 if !distribution.values.is_empty() {
-                    let time = match distribution.first.checked_add(interval) {
-                        None => panic!("Failed to determine distribution duration"),
-                        Some(s) => s
+                    let first = distribution.first.unwrap();
+                    let time = match first.checked_add(interval) {
+                        Some(s) => s,
+                        None => panic!("Failed to determine distribution duration")
                     };
                     if time.lt(&measurement.at) {
                         Metrics::metric_from(distribution, &mut callback);
@@ -1039,12 +1139,12 @@ impl Metrics {
                 match distribution.add(&measurement) {
                     Ok(_) => {}
                     Err(e) => match e {
-                        MetricsError::Overflow(_) => continue,
-                        MetricsError::Unrelated(e) => panic!("{}", e)
+                        MetricsError::Unrelated(..) => panic!("{}", e),
+                        _ => continue
                     }
                 }
             }
-            for (_, distribution) in &distributions {
+            for distribution in distributions.values() {
                 Metrics::metric_from(distribution, &mut callback);
             }
         });
@@ -1053,30 +1153,30 @@ impl Metrics {
         }
     }
 
+    /// Submit a [measurements](Measurement).
     pub fn submit(
         &self,
         measurement: Measurement,
     ) {
-        match self.tx.send(measurement) {
-            _ => {} /* ignored */
-        }
+        self.tx.send(measurement).ok();
     }
 
     fn metric_from<F>(
         distribution: &Distribution,
-        callback: &mut Option<F>,
+        callback: &mut F,
     )
         where
             F: FnMut(&Metric) + Send + 'static
     {
         let metric = match Metric::new(distribution) {
             Ok(m) => m,
-            Err(_) => return //TODO: log an error ....
+            Err(error) => {
+                //TODO: log the error ....
+                return;
+            }
         };
-        // TODO: log metric...
-        if callback.is_some() {
-            callback.as_mut().unwrap()(&metric);
-        }
+        // TODO: output the metric
+        callback(&metric);
     }
 }
 
@@ -1087,20 +1187,24 @@ mod tests {
 
     use crate::common::CommonError;
     use crate::metrics::*;
-    use std::iter::FromIterator;
+    use crate::metrics::MetricsError;
     use std::array::IntoIter;
+    use std::iter::FromIterator;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
 
     static ERROR_UNEXPECTED_ERROR: &str = "An unexpected error was returned";
 
     #[test]
-    fn tags_successfully_created_using_new() {
+    fn tags_successfully_created_using_try_from() {
         let h: HashMap<String, String> = [
             ("service", "awesome"),
             ("hostname", "localhost")
         ].iter().map(|e| {
             (String::from(e.0), String::from(e.1))
         }).collect();
-        let t = Tags::from(h.clone()).unwrap();
+        let t = Tags::try_from(h.clone()).unwrap();
         let mut m = BTreeMap::new();
         for (key, value) in &h {
             m.insert(key.clone(), value.clone());
@@ -1111,15 +1215,15 @@ mod tests {
 
     #[test]
     fn tags_error_on_creating_with_empty_key() {
-        let error = Tags::from([
+        let error = Tags::try_from([
             ("", "awesome"),
             ("hostname", "localhost")
         ].iter().map(|e| {
             (String::from(e.0), String::from(e.1))
-        }).collect()).unwrap_err();
+        }).collect::<HashMap<String, String>>()).unwrap_err();
         match error {
-            CommonError::Empty(message) => {
-                assert_eq!(message, "key in tags is empty")
+            CommonError::Empty(_) => {
+                assert_eq!("'key' is empty", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1129,15 +1233,15 @@ mod tests {
 
     #[test]
     fn tags_error_on_creating_with_blank_key() {
-        let error = Tags::from([
+        let error = Tags::try_from([
             (" \t\n", "awesome"),
             ("hostname", "localhost")
         ].iter().map(|e| {
             (String::from(e.0), String::from(e.1))
-        }).collect()).unwrap_err();
+        }).collect::<HashMap<String, String>>()).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "key in tags is blank")
+            CommonError::Blank(_) => {
+                assert_eq!("'key' is blank", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1154,18 +1258,18 @@ mod tests {
 
     #[test]
     fn tags_successfully_merge() {
-        let mut t = Tags::from([
+        let mut t = Tags::try_from([
             ("service", "awesome"),
             ("hostname", "localhost")
         ].iter().map(|e| {
             (String::from(e.0), String::from(e.1))
-        }).collect()).unwrap();
-        let o = Tags::from([
+        }).collect::<HashMap<String, String>>()).unwrap();
+        let o = Tags::try_from([
             ("service", "other"),
             ("component", "application")
         ].iter().map(|e| {
             (String::from(e.0), String::from(e.1))
-        }).collect()).unwrap();
+        }).collect::<HashMap<String, String>>()).unwrap();
         t.merge(&o);
         assert_eq!(t.entries, [
             ("service", "awesome"),
@@ -1184,9 +1288,9 @@ mod tests {
         let i = SystemTime::now();
         let m = Measurement::new(
             l, v, u, None).unwrap();
-        assert_eq!(l, m.label);
-        assert_eq!(v, m.value);
-        assert_eq!(u, m.unit);
+        assert_eq!(l, m.label());
+        assert_eq!(v, m.value());
+        assert_eq!(u, m.unit());
         assert_eq!(Tags::new(), m.tags);
         // Could be "flaky" if the system clock is updated and skewed backwards
         assert!(m.at.duration_since(i).unwrap().as_nanos() > 0);
@@ -1198,8 +1302,8 @@ mod tests {
         let error = Measurement::new(
             "", 0, unit::BYTES, None).unwrap_err();
         match error {
-            CommonError::Empty(message) => {
-                assert_eq!(message, "label is empty")
+            CommonError::Empty(_) => {
+                assert_eq!("'label' is empty", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1212,8 +1316,8 @@ mod tests {
         let error = Measurement::new(
             "\t", -10, unit::QUANTITY, None).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "label is blank")
+            CommonError::Blank(_) => {
+                assert_eq!("'label' is blank", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1226,8 +1330,8 @@ mod tests {
         let error = Measurement::new(
             "label", 0, "", None).unwrap_err();
         match error {
-            CommonError::Empty(message) => {
-                assert_eq!(message, "unit is empty")
+            CommonError::Empty(_) => {
+                assert_eq!("'unit' is empty", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1240,13 +1344,25 @@ mod tests {
         let error = Measurement::new(
             "label", -10, "  \n  ", None).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "unit is blank")
+            CommonError::Blank(_) => {
+                assert_eq!("'unit' is blank", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
             }
         }
+    }
+
+    #[test]
+    fn measurement_successfully_created_from_closure() {
+        let m = Measurement::from_closure("test_timing", None, || {
+            thread::sleep(Duration::from_millis(100));
+        }).unwrap();
+        assert_eq!("test_timing", m.label());
+        assert_eq!(&Tags::new(), m.tags());
+        assert_eq!(unit::NANOSECONDS, m.unit());
+        let delay = 100_000_000 as i128;
+        assert!(m.value().ge(&delay));
     }
 
     #[test]
@@ -1261,8 +1377,8 @@ mod tests {
         let error = Distribution::new(
             "", unit::PERCENTAGE, &Tags::new()).unwrap_err();
         match error {
-            CommonError::Empty(message) => {
-                assert_eq!(message, "label is empty")
+            CommonError::Empty(_) => {
+                assert_eq!("'label' is empty", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1275,8 +1391,8 @@ mod tests {
         let error = Distribution::new(
             "\t ", unit::QUANTITY, &Tags::new()).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "label is blank")
+            CommonError::Blank(_) => {
+                assert_eq!("'label' is blank", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1289,8 +1405,8 @@ mod tests {
         let error = Distribution::new(
             "label", "", &Tags::new()).unwrap_err();
         match error {
-            CommonError::Empty(message) => {
-                assert_eq!(message, "unit is empty")
+            CommonError::Empty(_) => {
+                assert_eq!("'unit' is empty", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1303,8 +1419,8 @@ mod tests {
         let error = Distribution::new(
             "label", "\t\n", &Tags::new()).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "unit is blank")
+            CommonError::Blank(_) => {
+                assert_eq!("'unit' is blank", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1325,7 +1441,7 @@ mod tests {
     }
 
     #[test]
-    fn distribution_error_on_adding_measurement_with_mismatched_label() {
+    fn distribution_error_on_adding_measurement_with_unrelated_label() {
         let mut d = Distribution::new(
             "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
@@ -1334,11 +1450,9 @@ mod tests {
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
-            MetricsError::Unrelated(message) => {
-                assert_eq!(message, error_message_mismatched_label(
-                    (d.label, DISTRIBUTION),
-                    (m.label, MEASUREMENT))
-                );
+            MetricsError::Unrelated(..) => {
+                assert_eq!("distribution with label of memory_used is unrelated to measurement \
+                with label of memory_free", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1347,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn distribution_error_on_adding_measurement_with_mismatched_unit() {
+    fn distribution_error_on_adding_measurement_with_unrelated_unit() {
         let mut d = Distribution::new(
             "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
@@ -1356,11 +1470,9 @@ mod tests {
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
-            MetricsError::Unrelated(message) => {
-                assert_eq!(message, error_message_mismatched_unit(
-                    (d.unit, DISTRIBUTION),
-                    (m.unit, MEASUREMENT))
-                );
+            MetricsError::Unrelated(..) => {
+                assert_eq!("distribution with unit of bytes is unrelated to measurement \
+                with unit of percentage", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1369,26 +1481,24 @@ mod tests {
     }
 
     #[test]
-    fn distribution_error_on_adding_measurement_with_mismatched_tags() {
+    fn distribution_error_on_adding_measurement_with_unrelated_tags() {
         let mut d = Distribution::new(
             "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
-        let t = Tags::from([
+        let t = Tags::try_from([
             ("service", "me"),
             ("component", "application")
         ].iter().map(|e| {
             (String::from(e.0), String::from(e.1))
-        }).collect()).unwrap();
+        }).collect::<HashMap<String, String>>()).unwrap();
         let m = Measurement::new(
             "memory_used", 20_000, unit::BYTES, Some(&t))
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
-            MetricsError::Unrelated(message) => {
-                assert_eq!(message, error_message_mismatched_tags(
-                    (&d.tags, DISTRIBUTION),
-                    (&t, MEASUREMENT))
-                );
+            MetricsError::Unrelated(..) => {
+                assert_eq!("distribution with tags of {} is unrelated to measurement with \
+                tags of {component=application, service=me}", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1408,14 +1518,9 @@ mod tests {
             .unwrap();
         let error = d.add(&m).unwrap_err();
         match error {
-            MetricsError::Overflow(message) => {
-                assert_eq!(message, error_message_overflow(
-                    "incrementing",
-                    &key,
-                    d.label,
-                    d.unit,
-                    &d.tags)
-                );
+            MetricsError::Overflow(_) => {
+                assert_eq!("Overflow occurred while incrementing key of 20000 for \
+                distribution of label=memory_used tags={} unit=bytes", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1439,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn distribution_error_on_merge_with_mismatched_label() {
+    fn distribution_error_on_merge_with_unrelated_label() {
         let mut d = Distribution::new(
             "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
@@ -1448,11 +1553,9 @@ mod tests {
             .unwrap();
         let error = d.merge(&o).unwrap_err();
         match error {
-            MetricsError::Unrelated(message) => {
-                assert_eq!(message, error_message_mismatched_label(
-                    (d.label, DISTRIBUTION),
-                    (o.label, DISTRIBUTION))
-                );
+            MetricsError::Unrelated(..) => {
+                assert_eq!("distribution with label of memory_used is unrelated to \
+                distribution with label of memory_free", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1461,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn distribution_error_on_merge_with_mismatched_unit() {
+    fn distribution_error_on_merge_with_unrelated_unit() {
         let mut d = Distribution::new(
             "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
@@ -1470,11 +1573,9 @@ mod tests {
             .unwrap();
         let error = d.merge(&o).unwrap_err();
         match error {
-            MetricsError::Unrelated(message) => {
-                assert_eq!(message, error_message_mismatched_unit(
-                    (d.unit, DISTRIBUTION),
-                    (o.unit, DISTRIBUTION))
-                );
+            MetricsError::Unrelated(..) => {
+                assert_eq!("distribution with unit of bytes is unrelated to distribution \
+                with unit of percentage", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1483,13 +1584,13 @@ mod tests {
     }
 
     #[test]
-    fn distribution_error_on_merge_with_mismatched_tags() {
-        let t = Tags::from([
+    fn distribution_error_on_merge_with_unrelated_tags() {
+        let t = Tags::try_from([
             ("service", "another"),
             ("component", "application")
         ].iter().map(|e| {
             (String::from(e.0), String::from(e.1))
-        }).collect()).unwrap();
+        }).collect::<HashMap<String, String>>()).unwrap();
         let mut d = Distribution::new(
             "memory_used", unit::BYTES, &t)
             .unwrap();
@@ -1498,11 +1599,9 @@ mod tests {
             .unwrap();
         let error = d.merge(&o).unwrap_err();
         match error {
-            MetricsError::Unrelated(message) => {
-                assert_eq!(message, error_message_mismatched_tags(
-                    (&d.tags, DISTRIBUTION),
-                    (&o.tags, DISTRIBUTION))
-                );
+            MetricsError::Unrelated(..) => {
+                assert_eq!("distribution with tags of {component=application, service=another} \
+                is unrelated to distribution with tags of {}", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1517,8 +1616,8 @@ mod tests {
             .unwrap();
         let error = Metric::new(&d).unwrap_err();
         match error {
-            CommonError::Empty(message) => {
-                assert_eq!(message, "distribution is empty")
+            MetricsError::Common(_) => {
+                assert_eq!("'distribution' is empty", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1532,11 +1631,13 @@ mod tests {
             "memory_used", unit::BYTES, &Tags::new())
             .unwrap();
         d.values.insert(0, 12);
-        d.last = SystemTime::UNIX_EPOCH;
+        d.first = Some(SystemTime::now());
+        d.last = Some(SystemTime::UNIX_EPOCH);
         let error = Metric::new(&d).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "Negative duration is not allowed")
+            MetricsError::NegativeDuration(_) => {
+                assert_eq!("Negative duration was recorded for distribution of \
+                label=memory_used tags={} unit=bytes", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1551,11 +1652,13 @@ mod tests {
             .unwrap();
         d.values.insert(-1, 1);
         d.values.insert(0, u128::MAX);
-        d.first = SystemTime::UNIX_EPOCH;
+        d.first = Some(SystemTime::UNIX_EPOCH);
+        d.last = Some(SystemTime::now());
         let error = Metric::new(&d).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "Overflow occurred while determining count")
+            MetricsError::Overflow(_) => {
+                assert_eq!("An overflow occurred while determining count from \
+                distribution of label=memory_used tags={} unit=bytes", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1570,11 +1673,13 @@ mod tests {
             .unwrap();
         // case that sum is a i128 type and can not hold a u128 value
         d.values.insert(2, u128::MAX);
-        d.first = SystemTime::UNIX_EPOCH;
+        d.first = Some(SystemTime::UNIX_EPOCH);
+        d.last = Some(SystemTime::now());
         let error = Metric::new(&d).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "Overflow occurred while determining sum")
+            MetricsError::Overflow(_) => {
+                assert_eq!("An overflow occurred while determining sum from distribution \
+                of label=memory_used tags={} unit=bytes", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1585,8 +1690,9 @@ mod tests {
         d.values.insert(2, i128::MAX as u128);
         let error = Metric::new(&d).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "Overflow occurred while determining sum")
+            MetricsError::Overflow(_) => {
+                assert_eq!("An overflow occurred while determining sum from distribution \
+                of label=memory_used tags={} unit=bytes", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1599,8 +1705,9 @@ mod tests {
         d.values.insert(3, 1);
         let error = Metric::new(&d).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "Overflow occurred while determining sum")
+            MetricsError::Overflow(_) => {
+                assert_eq!("An overflow occurred while determining sum from distribution \
+                of label=memory_used tags={} unit=bytes", format!("{}", error));
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -1616,13 +1723,16 @@ mod tests {
         d.values.insert(1, 7);
         d.values.insert(2, 17);
         d.values.insert(8, 5);
-        d.first = SystemTime::UNIX_EPOCH;
+        let first = SystemTime::UNIX_EPOCH;
+        let last = SystemTime::now();
+        d.first = Some(first);
+        d.last = Some(last);
         let m = Metric::new(&d).unwrap();
         assert_eq!(d.label, m.label());
         assert_eq!(d.unit, m.unit());
         assert!(m.tags().is_empty());
-        assert_eq!(d.last.duration_since(d.first).unwrap().as_nanos(), m.duration());
-        assert_eq!(&d.last, m.at());
+        assert_eq!(last.duration_since(first).unwrap().as_nanos(), m.duration());
+        assert_eq!(&last, m.at());
         assert_eq!(&BTreeMap::from_iter(IntoIter::new([(1, 7), (2, 17), (8, 5)])),
                    m.distribution());
         assert_eq!(29, m.count());
@@ -1644,5 +1754,93 @@ mod tests {
         assert_eq!(8, m.p99_999());
         assert_eq!(8, m.p99_9999());
         assert_eq!(8, m.p99_99999());
+    }
+
+    #[test]
+    fn metrics_successfully_created_with_trivial_example() {
+        let callback_was_called = Arc::new(AtomicBool::new(false));
+        let clone = callback_was_called.clone();
+        // Setting interval to 0 will only allow measurements that were created at the same
+        // nanosecond become part of the metric
+        let m = Metrics::new(Duration::from_secs(0), move |metric| {
+            clone.store(true, Ordering::SeqCst);
+            assert_eq!("cpu", metric.label());
+            assert_eq!(unit::PERCENTAGE, metric.unit());
+            assert!(metric.tags().is_empty());
+            assert_eq!(0, metric.duration);
+            assert_eq!(&BTreeMap::from_iter(IntoIter::new([(1, 1)])),
+                       metric.distribution());
+            assert_eq!(1, metric.count());
+            assert_eq!(1, metric.sum());
+            assert_eq!(1, metric.max());
+            assert_eq!(1, metric.min());
+            assert_eq!(1, metric.mode().unwrap());
+            assert_eq!(1, metric.mean());
+            assert_eq!(1, metric.median());
+            assert_eq!(1, metric.p05());
+            assert_eq!(1, metric.p25());
+            assert_eq!(1, metric.p50());
+            assert_eq!(1, metric.p75());
+            assert_eq!(1, metric.p90());
+            assert_eq!(1, metric.p95());
+            assert_eq!(1, metric.p99());
+            assert_eq!(1, metric.p99_9());
+            assert_eq!(1, metric.p99_99());
+            assert_eq!(1, metric.p99_999());
+            assert_eq!(1, metric.p99_9999());
+            assert_eq!(1, metric.p99_99999());
+        });
+        // first measurement is recorded
+        let measurement = Measurement::new(
+            "cpu", 1, unit::PERCENTAGE, None).unwrap();
+        m.submit(measurement);
+        // second measurement causes the creation of the metric and use of the callback
+        let measurement = Measurement::new(
+            "cpu", 1, unit::PERCENTAGE, None).unwrap();
+        m.submit(measurement);
+        thread::sleep(Duration::from_secs(1));
+        assert!(callback_was_called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn metrics_successfully_created() {
+        let callback_was_called = Arc::new(AtomicBool::new(false));
+        let clone = callback_was_called.clone();
+        let m = Metrics::new(Duration::from_secs(1), move |metric| {
+            clone.store(true, Ordering::SeqCst);
+            assert_eq!("cpu", metric.label());
+            assert_eq!(unit::PERCENTAGE, metric.unit());
+            assert!(metric.tags().is_empty());
+            assert_eq!(100, metric.count());
+            assert_eq!(4950, metric.sum());
+            assert_eq!(99, metric.max());
+            assert_eq!(0, metric.min());
+            assert_eq!(&None, metric.mode());
+            assert_eq!(49, metric.mean());
+            assert_eq!(49, metric.median());
+            assert_eq!(4, metric.p05());
+            assert_eq!(24, metric.p25());
+            assert_eq!(49, metric.p50());
+            assert_eq!(74, metric.p75());
+            assert_eq!(89, metric.p90());
+            assert_eq!(94, metric.p95());
+            assert_eq!(98, metric.p99());
+            assert_eq!(99, metric.p99_9());
+            assert_eq!(99, metric.p99_99());
+            assert_eq!(99, metric.p99_999());
+            assert_eq!(99, metric.p99_9999());
+            assert_eq!(99, metric.p99_99999());
+        });
+        for i in 0..100 {
+            let measurement = Measurement::new(
+                "cpu", i, unit::PERCENTAGE, None).unwrap();
+            m.submit(measurement);
+        }
+        thread::sleep(Duration::from_secs(1));
+        let measurement = Measurement::new(
+            "cpu", 0, unit::PERCENTAGE, None).unwrap();
+        m.submit(measurement);
+        thread::sleep(Duration::from_secs(1));
+        assert!(callback_was_called.load(Ordering::SeqCst));
     }
 }
