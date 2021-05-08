@@ -35,7 +35,8 @@ impl Executioner {
         where
             F: FnOnce() + Send + 'static,
     {
-        let mut vec = self.workers.lock()
+        let mut vec = self.workers
+            .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut expired = Vec::new();
         for i in 0..vec.len() {
@@ -43,7 +44,7 @@ impl Executioner {
                 None => continue,
                 Some(m) => m
             };
-            let worker = match mutex.lock() {
+            let worker = match mutex.get_mut() {
                 Ok(w) => w,
                 Err(_) => {
                     expired.push(i);
@@ -53,11 +54,8 @@ impl Executioner {
             let mut data = match worker.mutex.try_lock() {
                 Ok(d) => d,
                 Err(e) => {
-                    match e {
-                        TryLockError::Poisoned(_) => {
-                            expired.push(i);
-                        }
-                        _ => {}
+                    if let TryLockError::Poisoned(_) = e {
+                        expired.push(i);
                     }
                     continue;
                 }
@@ -172,7 +170,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::common::CommonError;
-    use crate::foundation::executors::{Executioner, Worker};
+    use crate::executors::{Executioner, Worker};
 
     static ERROR_UNEXPECTED_ERROR: &str = "An unexpected error was returned";
 
@@ -180,8 +178,8 @@ mod tests {
     fn worker_error_on_creating_with_empty_name() {
         let error = Worker::new(0, "", || {}).unwrap_err();
         match error {
-            CommonError::Empty(message) => {
-                assert_eq!(message, "name is empty")
+            CommonError::Empty(_) => {
+                assert_eq!("'name' is empty", format!("{}", error))
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
@@ -193,8 +191,8 @@ mod tests {
     fn worker_error_on_creating_with_blank_name() {
         let error = Worker::new(0, "\t\n", || {}).unwrap_err();
         match error {
-            CommonError::Invalid(message) => {
-                assert_eq!(message, "name is blank")
+            CommonError::Blank(_) => {
+                assert_eq!("'name' is blank", format!("{}", error))
             }
             _ => {
                 panic!("{}", ERROR_UNEXPECTED_ERROR);
